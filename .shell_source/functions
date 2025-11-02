@@ -1013,17 +1013,84 @@ function docker_inspect() {
 
 function docker_log() {
 #docker inspect log output
+    local container="${1:-}"
+    local sudo_used=''
+    local output_format="json"
+    local interval="1s"
+    local result=''
+    local part_line=''    
+
+    if [[ -z "$container" ]] || [[ "$container" =~ ^-- ]]; then        
+        echo "Usage: docker_log <conatainer> --since=[since]"
+        echo "Example: dcoker_log nginx1"
+        return 1
+    fi
+    shift
+
+    if [[ $EUID -ne 0 ]]; then
+        if $(sudo -v);
+            then sudo_used='sudo'
+        fi
+    fi
+
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            --since=*) interval="${1#*=}" ;;
+            --since)
+                interval="${2:-${interval}}"; shift ;;
+            --format=*) output_format="${1#*=}" ;;
+            --format)
+                output_format="${2:-${output_format}}"; shift ;;
+            *)
+                #ignore
+                ;;
+        esac
+        shift
+    done
+
     if [ -n $(whereis docker |cut -d: -f2 |egrep '/bin|/sbin' |tr -d ' ') ]; then
         if [ -n $(whereis jq |cut -d: -f2 |egrep '/bin|/sbin' |tr -d ' ') ]; then
 
-            local sudo_used=''
-            if $(sudo -v); then sudo_used='sudo'; fi
-
-            ${sudo_used} docker inspect "$1" \
+            ${sudo_used} docker inspect "$container" \
             | jq -r '.[0].State.Health.Log[].Output'
 
+            local grep_time=$(echo $interval |grep -o '[a-zA-Z]')
+            local grep_num=$(echo $interval |grep -o '[0-9]\+')
+            if [ -n "$grep_num" ]; then
+                if [ -z "$grep_time" ]; then interval="${interval}s"; fi
+            else
+                echo "Value in parameter not found"
+                return 1
+            fi
+
             echo -e "==================== LOGS for ${1} =====================: \n\n"
-            ${sudo_used} docker logs --details -f "$1"
+            while true; do
+                part_line="$(
+                    printf '\n'; printf '%.0s-' {1..50}; \
+                    printf '  %s  ' "$(date '+%A %B %d   %H:%M:%S %Y %Z')"; \
+                    printf '%.0s-' {1..50}; printf '\n'
+                )"
+
+                if [[ "$output_format" =~ ^json ]] && command -v jq &>/dev/null
+                    then
+                        result=$(
+                            ${sudo_used} docker logs --details "$container" \
+                                --since "$interval" 2>&1 |jq
+                        )
+                    else
+                        result=$(
+                            ${sudo_used} docker logs --details "$container" \
+                                --since "$interval" 2>&1 |sed 's/$/\r\n/g'
+                        )
+                fi
+
+                if [ -n "$result" ]; then
+                    echo -e "\033[0;33m $part_line \033[0m"
+                    echo -e "$result\n"
+                fi
+
+                sleep $interval
+            done
         fi
     fi
 }
@@ -1073,6 +1140,84 @@ cat_z () {
     done
 }
 
+journal_log () {
+# Cl - 6183f514-6143-4026-9e97-698abd351f36
+    local unit="${1:-}"
+    local interval="1s"
+    local output_format="json"
+    local sudo_used=''
+    local result=''
+    local part_line=''    
+    
+    if [[ -z "$unit" ]] || [[ "$unit" =~ ^-- ]]; then        
+        echo "Usage: journal_log <unit> --since=[since] --format=[format]"
+        echo "Example: journal_log nginx.service"
+        return 1
+    fi
+    shift
+
+    if [[ $EUID -ne 0 ]]; then
+        if $(sudo -v);
+            then sudo_used='sudo'
+        fi
+    fi
+
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            --since=*) interval="${1#*=}" ;;
+            --since)
+                interval="${2:-${interval}}"; shift ;;
+            --format=*) output_format="${1#*=}" ;;
+            --format)
+                output_format="${2:-${output_format}}"; shift ;;
+            *)
+                #ignore
+                ;;
+        esac
+        shift
+    done
+
+    local grep_time=$(echo $interval |grep -o '[a-zA-Z]')
+    local grep_num=$(echo $interval |grep -o '[0-9]\+')
+    if [ -n "$grep_num" ]; then
+        if [ -z "$grep_time" ]; then interval="${interval}s"; fi
+    else
+        echo "Value in parameter not found"
+        return 1
+    fi
+
+    echo -e "==================== LOGS for ${unit} =====================\n"
+    while true; do
+        part_line="$(
+            printf '\n'; printf '%.0s-' {1..50}; \
+            printf '  %s  ' "$(date '+%A %B %d   %H:%M:%S %Y %Z')"; \
+            printf '%.0s-' {1..50}; printf '\n'
+        )"
+
+        if [[ "$output_format" =~ ^json ]] && command -v jq &>/dev/null
+            then
+                result=$(
+                    ${sudo_used} journalctl -u "$unit" \
+                        --since "-${interval}" \
+                        --no-pager --output="$output_format" |jq
+                )
+            else
+                result=$(
+                    ${sudo_used} journalctl -u "$unit" \
+                        --since "-${interval}" --no-pager \
+                        --output="$output_format"
+                )
+        fi
+
+        if [ -n "$result" ]; then
+            echo -e "\033[0;33m $part_line \033[0m"
+            echo -e "$result\n"
+        fi
+
+        sleep "$interval"
+    done
+
+}
 
 
 myfunctions_aliases () {
@@ -1101,6 +1246,7 @@ SYSTEMD:
         sys-enable
         sys-disable
         sysstopstart
+        journal_log
 
 PERMANCE CHECK:
         check_mem
@@ -1176,7 +1322,7 @@ OTHER:
         scrd, mounts, supdate
         sprunge, phpinfo_e
         speedt, speedt1, speeddown
-        locru, locen, lessr
+        locru, locen, lessr. jobs
 
     '
 }

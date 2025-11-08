@@ -1219,6 +1219,52 @@ journal_log () {
 
 }
 
+jobs() {
+# Example: jobss
+    declare -A job_pids
+    declare -A job_markers   # -> marker ('+', '-' or '')
+    declare -A job_commands
+    
+    local jobs_output
+    jobs_output=$(builtin jobs -l)
+    
+    if [[ -z "$jobs_output" ]]; then
+        return 1
+    fi
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[([0-9]+)\]([+-]?)\ +([0-9]+) ]]; then
+            local job_num="${BASH_REMATCH[1]}"
+            local marker="${BASH_REMATCH[2]}"
+            local pid="${BASH_REMATCH[3]}"
+            
+            job_pids[$job_num]=$pid
+            job_markers[$job_num]=$marker
+        fi
+    done <<< "$jobs_output"
+    
+    # Get command
+    for job_num in "${!job_pids[@]}"; do
+        local pid="${job_pids[$job_num]}"
+        local full_command
+        full_command=$(ps -p "$pid" -o cmd= 2>/dev/null)
+        
+        if [[ -z "$full_command" ]]; then
+            full_command="<NOT FOUND>"
+        else
+            full_command=$(echo "$full_command" | sed -E 's|^/usr/bin/sudo ([A-Z_]+=\S+ )*|sudo |')
+        fi
+        job_commands[$job_num]=$full_command
+    done
+    
+    # result in associative
+    for job_num in $(echo "${!job_pids[@]}" | tr ' ' '\n' | sort -n); do
+        local marker="${job_markers[$job_num]}"
+        local pid="${job_pids[$job_num]}"
+        local command="${job_commands[$job_num]}"
+        printf "[%d]%s %d\t\t%s\n" "$job_num" "$marker" "$pid" "$command"
+    done
+}
 
 myfunctions_aliases () {
     echo -e '

@@ -649,7 +649,8 @@ function show_new_files() {
           tail -n10
         )
 
-        echo -e "${all_cli_args} \n ${last_history} \n " >> ${out_path}/changed_from_${TIME}_last_${minits}_min
+        echo "$(date +%F %H:%M:%S)" > ${out_path}/changed_from_${TIME}_last_${minits}_min
+        echo -e "args: ${all_cli_args} \n ${last_history} \n " >> ${out_path}/changed_from_${TIME}_last_${minits}_min
         command_output="$new_cat ${out_path}/changed_from_${TIME}_last_${minits}_min"
         echo_console="saved output in ${out_path}/changed_from_${TIME}_last_${minits}_min"
     fi
@@ -1209,7 +1210,7 @@ journal_log () {
                 )
         fi
 
-        if [ -n "$result" ]; then
+        if [ -n "$result" ] && [[ "$result" != '-- No entries --' ]]; then
             echo -e "\033[0;33m $part_line \033[0m"
             echo -e "$result\n"
         fi

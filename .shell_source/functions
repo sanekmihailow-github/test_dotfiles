@@ -786,6 +786,7 @@ show_changed_files() {
 addBackup() {
     local backup_path="${PWD}/${1}"
     local check_type="$(file -b ${backup_path})"
+    local check_exist_chattr="$(type -P chattr)"
     sudo_used=''
     local num=0
     local check_num=0
@@ -815,7 +816,11 @@ addBackup() {
                 check_num=$(echo "$check_previous" |wc -l)
             fi
             num=$(expr $check_num + 1)
-            ${sudo_used} cp ${backup_path} ${backup_path}.bak${num}
+            ${sudo_used} cp -a ${backup_path} ${backup_path}.bak${num}
+            ${sudo_used} chmod 0444 ${backup_path}.bak${num}
+            if [ -n "$check_exist_chattr" ]; then
+                ${sudo_used} chattr +A ${backup_path}.bak${num}
+            fi
     fi
 }
 

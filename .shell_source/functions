@@ -1272,6 +1272,28 @@ jobs() {
     done
 }
 
+renull() {
+# clean file     
+    if [ -z "$1" ]; then
+        echo "Error: file not specified" >&2
+        echo "Usage: renull </path/to/file>" >&2
+        return 1
+    fi
+    
+    if [ ! -f "$1" ]; then
+        echo "Error: file '$1' does not exist" >&2
+        return 1
+    fi
+    
+    if [ ! -w "$1" ]; then
+        echo "Error: no write permission for file '$1'" >&2
+        return 1
+    fi
+    
+    cat /dev/null > "$1"
+    echo "File '$1' successfully clean"
+}
+
 myfunctions_aliases () {
     echo -e '
 HIGHLIGHTS HISTORY SEARCH:

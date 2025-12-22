@@ -1294,6 +1294,59 @@ renull() {
     echo "File '$1' successfully clean"
 }
 
+pbcopy() {
+    local xsel_exist=false
+    local xclip_exist=false
+
+    local path_xsel=$(type -P xsel)
+    if [[ $? == 0 ]]; then
+        xsel_exist=true
+    fi
+
+    local path_xclip=$(type -P xclip)
+    if [[ $? == 0 ]]; then
+        xclip_exist=true
+    fi
+    
+    if $check_xsel; then
+        cat "$1" |$path_xsel --clipboard --input
+    elif $check_xclip; then
+        cat "$1" |$path_xclip -selection clipboard
+    else
+        echo -e "xsel or xclip not found, please install this before use it \n"
+    fi            
+}
+
+pbpaste() {
+    local xsel_exist=false
+    local xclip_exist=false
+    local output_path="$1"
+
+    local path_xsel=$(type -P xsel)
+    if [[ $? == 0 ]]; then
+        xsel_exist=true
+    fi
+
+    local path_xclip=$(type -P xclip)
+    if [[ $? == 0 ]]; then
+        xclip_exist=true
+    fi
+    
+    if $check_xsel; then
+        if [ -n "$output_path" ]
+            then $path_xsel --clipboard --output >> $output_path
+            else $path_xsel --clipboard --output
+        fi
+    elif $check_xclip; then
+        if [ -n "$output_path" ]
+            then $path_xclip -selection clipboard -o >> $output_path
+            else $path_xclip -selection clipboard -o
+        fi
+    else
+        echo -e "xsel or xclip not found, please install this before use it \n"
+    fi            
+}
+
 myfunctions_aliases () {
     echo -e '
 HIGHLIGHTS HISTORY SEARCH:
@@ -1337,7 +1390,7 @@ DISK SIZE CHECK:
 NET CHECK:
         ports                       - show all ports listening
         ports4, ports6
-        cmyip, ip_a
+        cmyip, ip_a, ip_r
 
 SEARCH:
         removeComments      - cat and remove comments
@@ -1396,7 +1449,8 @@ OTHER:
         scrd, mounts, supdate
         sprunge, phpinfo_e
         speedt, speedt1, speeddown
-        locru, locen, lessr. jobs
+        locru, locen, lessr, jobs, renull
+        pbcopy, pbpaste
 
     '
 }

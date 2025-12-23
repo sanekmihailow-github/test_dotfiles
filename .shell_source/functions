@@ -1295,6 +1295,7 @@ renull() {
 }
 
 pbcopy() {
+# copy to clipboard buffer    
     local xsel_exist=false
     local xclip_exist=false
 
@@ -1318,6 +1319,7 @@ pbcopy() {
 }
 
 pbpaste() {
+# paste from clipboard buffer    
     local xsel_exist=false
     local xclip_exist=false
     local output_path="$1"
@@ -1345,6 +1347,12 @@ pbpaste() {
     else
         echo -e "xsel or xclip not found, please install this before use it \n"
     fi            
+}
+
+lla_z() {
+# show list files without archive versions    
+    echo -e "this dir - $PWD \n"
+    ls -lat "$PWD" |egrep -v '*.gz|*.bz|*.tar|*zip|*.rar| .$| ..$'
 }
 
 myfunctions_aliases () {
@@ -1445,7 +1453,7 @@ OTHER:
         vime, svi
         wdownload, lnn
         xsc, lnn
-        lla, lss
+        lla, lss, lla_z
         scrd, mounts, supdate
         sprunge, phpinfo_e
         speedt, speedt1, speeddown

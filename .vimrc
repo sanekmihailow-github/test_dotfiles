@@ -193,6 +193,7 @@ noremap <c-k> <c-w>-
 noremap <c-h> <c-w>>
 "noremap <c-l> <c-w><    
 
+nnoremap <C-d> ld0
 nnoremap <C-x> :call MyToggleNumbers()<CR>
 nnoremap <C-s> :w<CR>
 nnoremap <C-n> :exec &nu==&rnu? "set nornu!" : "set rnu!"<cr>

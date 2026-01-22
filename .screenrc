@@ -5,7 +5,10 @@ hardstatus on
 #---------------------------------------------------------------------------------------------
 
 # escape ^aa #- def prefix
-escape ``   #- my prefix tilda <~>
+#escape ``         #- prefix backtick <`>       #see tilda
+#escape ^[^[       #- prefix <Command> or <Alt>
+escape \000\000    #- my prefix <Ctrl + Space>
+
 # new buffer
         # showkeys -a #command for know value button keyboard
 
@@ -17,14 +20,21 @@ bind ^[ copy
 
 # more buffer size equal less new window (2999999 - 7 window max)
 # 999999 equal 15 window max
-defscrollback 399999
+defscrollback 299999
 bind ^k
 bind ^\
+bind ^x quit
+bind x quit
+bind ^ll lockscreen
 bind \\ quit
 bind K kill
 bind I login on
 bind O login off
 bind } history
+bind n next
+bind -k kr next
+bind p prev
+bind -k kl prev
 # this setting breaks ctrl + all arrow in vim
 #W- term screen-256color
 hardstatus off

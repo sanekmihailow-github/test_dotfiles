@@ -649,7 +649,7 @@ function show_new_files() {
           tail -n10
         )
 
-        echo "$(date +%F %H:%M:%S)" > ${out_path}/changed_from_${TIME}_last_${minits}_min
+        echo "$(date '+%F %H:%M:%S')" > ${out_path}/changed_from_${TIME}_last_${minits}_min
         echo -e "args: ${all_cli_args} \n ${last_history} \n " >> ${out_path}/changed_from_${TIME}_last_${minits}_min
         command_output="$new_cat ${out_path}/changed_from_${TIME}_last_${minits}_min"
         echo_console="saved output in ${out_path}/changed_from_${TIME}_last_${minits}_min"
@@ -1355,6 +1355,14 @@ lla_z() {
     ls -lat "$PWD" |egrep -v '*.gz|*.bz|*.tar|*zip|*.rar| .$| ..$'
 }
 
+#source $HOME/.shell_source/ext_functions/catuniq
+if [ -d "$HOME/.shell_source/ext_functions" ]; then
+    for file in "$HOME/.shell_source/ext_functions"/*; do
+        [ -f "$file" ] && . "$file"
+    done
+fi
+
+
 myfunctions_aliases () {
     echo -e '
 HIGHLIGHTS HISTORY SEARCH:
@@ -1408,6 +1416,7 @@ SEARCH:
         dirtree, stripcomments
         show_new_files
         show_changed_files
+        catuniq
 
 DOCKER:
         docker_all

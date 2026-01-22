@@ -1,0 +1,1070 @@
+# catuniq - Filter and display unique log entries with time-based filtering
+#
+# Usage: catuniq [DURATION] [OPTIONS] [FILE...]
+#
+# Examples:
+#   catuniq 15m /var/log/nginx/error.log
+#   catuniq 1h --count --sort freq /var/log/app.log
+#   catuniq --date-fmt='[0-9]{4}-[0-9]{2}-[0-9]{2}' /var/log/syslog
+
+catuniq() {
+    # ============================================================================
+    # DEFAULT CONFIGURATION
+    # ============================================================================
+
+    # Date pattern (nginx format by default)
+    # Using bracket expressions [[] and []] for literal square brackets
+    # Escaping slashes after braces to avoid bash brace expansion issues
+    local date_fmt="${CATUNIQ_DATE_FMT:-[[][0-9]{2\}/[A-Za-z]{3\}/[0-9]{4\}:[0-9]{2\}:[0-9]{2\}:[0-9]{2\} [+-][0-9]{4\}[]]}"
+
+    # Time window (5 minutes by default)
+    local date_time="${CATUNIQ_DATE_TIME:-5m}"
+
+    # Start time reference (current time by default)
+    local date_from=""
+
+    # Year for date normalization (empty by default, uses auto-detection)
+    local year=""
+
+    # Column where date is located (1 by default, 'none' for searching entire line)
+    # Can be a single column (1), multiple columns (1,2,3), or range (1-3)
+    local col_start="${CATUNIQ_COL_START:-1}"
+
+    # Field delimiter
+    local delimiter=" "
+
+    # Columns to cut (remove)
+    local cut_spec=""
+
+    # ============================================================================
+    # TEXT PROCESSING RULES
+    # ============================================================================
+    # These arrays store rules for text manipulation. Processing order:
+    # 1. cut/remove (column operations)
+    # 2. change (column value replacement)
+    # 3. del (text deletion)
+    # 4. replace (text replacement)
+
+    # Delete patterns array (remove matching text from entire line)
+    # Example: --del 'user=[^ ]+' removes "user=alice"
+    local del_patterns=()
+
+    # Replace patterns array (pattern===>replacement)
+    # Example: --replace 'ERROR===>WARN' changes all ERROR to WARN
+    local replace_patterns=()
+
+    # Remove column rules array (col:pattern)
+    # Only removes column if it matches pattern
+    # Example: --remove '9:200' removes column 9 only if value is 200
+    local remove_rules=()
+
+    # Change column rules array (col:pattern:text)
+    # Changes column value if it matches pattern
+    # Example: --change '3:ERROR:WARN' changes column 3 from ERROR to WARN
+    local change_rules=()
+
+    # Flags
+    local case_insensitive='false'
+    local count='false'
+    local invert='false'
+    local verbose='false'
+    local dry_run='false'
+
+    # Sorting and output
+    local sort_mode='none'  # none, alpha, freq, time
+    local max_lines=""
+    local output_file=""
+
+    # Input files
+    local input_files=()
+
+    # ============================================================================
+    # HELPER FUNCTIONS
+    # ============================================================================
+
+    _catuniq_error() {
+        echo "[ERROR] $*" >&2
+    }
+
+    _catuniq_verbose() {
+        [[ "$verbose" == 'true' ]] && echo "[DEBUG] $*" >&2
+    }
+
+    _catuniq_normalize_date() {
+        local date_str="$1"
+        local force_year="$2"  # Optional year parameter
+
+        # Remove brackets
+        date_str="${date_str//[/}"
+        date_str="${date_str//]/}"
+
+        # If --year is specified and date is in syslog format without year, add it
+        if [[ -n "$force_year" ]]; then
+            # For syslog format "MMM DD HH:MM:SS", insert year: "MMM DD YYYY HH:MM:SS"
+            if [[ "$date_str" =~ ^([A-Za-z]{3}[[:space:]]+[0-9]{1,2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})(.*)$ ]]; then
+                local date_part="${BASH_REMATCH[1]}"
+                local time_part="${BASH_REMATCH[2]}"
+                local rest="${BASH_REMATCH[3]}"
+                echo "$date_part $force_year $time_part$rest"
+                return 0
+            fi
+        fi
+
+        # Normalize nginx format: 20/Jan/2026:20:55:00 +0300 -> 20 Jan 2026 20:55:00 +0300
+        if [[ "$date_str" =~ ^([0-9]{2})/([A-Za-z]{3})/([0-9]{4}):(.*)$ ]]; then
+            local day="${BASH_REMATCH[1]}"
+            local month="${BASH_REMATCH[2]}"
+            local year_val="${BASH_REMATCH[3]}"
+            local time_tz="${BASH_REMATCH[4]}"
+            date_str="$day $month $year_val $time_tz"
+            echo "$date_str"
+            return 0
+        fi
+
+        # Try to parse as-is first
+        local parsed_epoch
+        parsed_epoch=$(date -d "$date_str" +%s 2>/dev/null)
+        if [[ $? -eq 0 ]]; then
+            local now_epoch
+            now_epoch=$(date +%s)
+            local time_diff=$((parsed_epoch - now_epoch))
+
+            # If parsed date is more than 30 days in the future, try adding year (auto-detection)
+            # This handles syslog dates without year like "Dec 25 07:44:17"
+            # Only do this if --year is NOT specified
+            if [[ -z "$force_year" ]] && [[ $time_diff -gt 2592000 ]]; then  # 30 days in seconds
+                # For syslog format "MMM DD HH:MM:SS", insert year: "MMM DD YYYY HH:MM:SS"
+                if [[ "$date_str" =~ ^([A-Za-z]{3}[[:space:]]+[0-9]{1,2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})(.*)$ ]]; then
+                    local date_part="${BASH_REMATCH[1]}"
+                    local time_part="${BASH_REMATCH[2]}"
+                    local rest="${BASH_REMATCH[3]}"
+
+                    local current_year
+                    current_year=$(date +%Y)
+                    local best_year=$current_year
+                    local best_diff=$time_diff
+                    if [[ $best_diff -lt 0 ]]; then
+                        best_diff=$((-best_diff))
+                    fi
+
+                    # Try current year and previous 2 years
+                    for year_offset in 0 -1 -2; do
+                        local try_year=$((current_year + year_offset))
+                        local with_year_str="$date_part $try_year $time_part$rest"
+
+                        local with_year_epoch
+                        with_year_epoch=$(date -d "$with_year_str" +%s 2>/dev/null)
+                        if [[ $? -eq 0 ]]; then
+                            local new_diff=$((with_year_epoch - now_epoch))
+                            if [[ $new_diff -lt 0 ]]; then
+                                new_diff=$((-new_diff))
+                            fi
+
+                            # Keep the year that gives closest match to now
+                            if [[ $new_diff -lt $best_diff ]]; then
+                                best_diff=$new_diff
+                                best_year=$try_year
+                            fi
+                        fi
+                    done
+
+                    # If we found a better match, use it
+                    if [[ $best_year -ne $current_year ]] || [[ $time_diff -lt 0 ]]; then
+                        echo "$date_part $best_year $time_part$rest"
+                        return 0
+                    fi
+                fi
+            fi
+
+            echo "$date_str"
+            return 0
+        fi
+
+        # Return as-is if no normalization matched
+        echo "$date_str"
+    }
+
+    _catuniq_help() {
+        cat <<'EOF'
+catuniq - Filter and display unique log entries with time-based filtering
+
+USAGE:
+    catuniq [DURATION] [OPTIONS] [FILE...]
+
+DURATION:
+    First positional argument can be a duration (e.g., 15s, 5m, 2h, 1d)
+    This sets the time window for filtering logs.
+
+OPTIONS:
+    Date/Time Options:
+        --date-fmt=REGEX        Regex pattern to match date in logs
+                                (default: nginx format)
+        --date-time=DURATION    Time window to filter (default: 5m)
+                                Format: 15s, 5m, 2h, 1d
+        --date-from=DATETIME    Reference time (default: current time)
+        --year=YYYY             Explicit year for syslog dates (e.g., 2025)
+                                Overrides automatic year detection
+        --col-start=SPEC        Column(s) with date (default: 1)
+                                Single: 1, Multiple: 1,2,3, Range: 1-3
+                                Use 'none' to search entire line
+
+    Processing Options:
+        --delimiter=CHAR        Field delimiter (default: space)
+        --cut=SPEC              Remove columns (e.g., 1,3,5 or 1-3,5)
+        --del=PATTERN           Delete matching regex pattern (can be used multiple times)
+        --replace=PATTERN===>REPL Replace regex pattern with string
+                                Format: 'pattern===>replacement'
+                                Can be used multiple times
+                                Example: --replace 'ERROR===>WARN'
+        --remove=COL:PATTERN    Remove column if it matches pattern
+                                Format: 'column_num:pattern'
+                                Can be used multiple times
+                                Example: --remove '3:[0-9]{1,4}' --remove '7:eth[0-9]'
+        --change=COL:PATTERN:TEXT Change column value if it matches pattern
+                                Format: 'column_num:pattern:replacement'
+                                Escape colons in pattern with \:
+                                Can be used multiple times
+                                Example: --change '3:ERROR:WARN' --change '5:db_error\:.*:DB_ERR'
+        --case-insensitive      Ignore case when determining uniqueness
+
+    Output Options:
+        --count                 Show occurrence count for each unique line
+        --invert                Show only duplicates (lines appearing 2+ times)
+        --sort=MODE             Sort output: none, alpha, freq, time
+        --max-lines=N           Limit output to N lines
+        --output=FILE           Write output to file instead of stdout
+
+    Other:
+        --verbose               Enable verbose debug output
+        --dry-run               Show configuration without processing
+        --help                  Show this help message
+
+EXAMPLES:
+    # Show unique errors from last 15 minutes
+    catuniq 15m /var/log/nginx/error.log
+
+    # Count unique patterns in last hour, sorted by frequency
+    catuniq 1h --count --sort freq /var/log/app.log
+
+    # Remove IP addresses and user IDs, show unique messages
+    catuniq 30m \
+        --del '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' \
+        --del 'user=[^ ]+' \
+        /var/log/app.log
+
+    # Replace ERROR with WARN and user IDs with 'USER'
+    catuniq 30m \
+        --replace 'ERROR===>WARN' \
+        --replace 'user=[0-9]+===>user=USER' \
+        /var/log/app.log
+
+    # Process K3s logs (ISO 8601 timestamp)
+    catuniq 1h \
+        --col-start none \
+        --date-fmt '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
+        /var/log/k3s/agent.log
+
+    # Process syslog with explicit year
+    catuniq --date-from "Dec 25 07:44:17" --year 2025 \
+        --date-fmt '[A-Z][a-z]{2,4} [0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' \
+        --col-start 1-3 \
+        /var/log/syslog
+
+    # Multiple columns for date extraction (syslog format)
+    catuniq 1h \
+        --date-fmt '[A-Z][a-z]{2,4} [0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' \
+        --col-start 1,2,3 \
+        /var/log/messages
+
+ENVIRONMENT VARIABLES:
+    CATUNIQ_DATE_FMT        Default date format regex
+    CATUNIQ_DATE_TIME       Default time window
+    CATUNIQ_COL_START       Default column start
+
+EOF
+    }
+
+    # ============================================================================
+    # PARSE POSITIONAL DURATION ARGUMENT
+    # ============================================================================
+
+    # Check if first argument is a duration (e.g., "15m", "1h")
+    if [[ "${1:-}" =~ ^[0-9]+[smhd]$ ]] && [[ ! "${1:-}" =~ ^- ]]; then
+        date_time="$1"
+        shift
+    fi
+
+    # ============================================================================
+    # PARSE OPTIONS
+    # ============================================================================
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                _catuniq_help
+                return 0
+                ;;
+
+            # Date/Time options
+            --date-fmt=*)
+                date_fmt="${1#*=}"
+                ;;
+            --date-fmt)
+                date_fmt="${2:-}"
+                shift
+                ;;
+
+            --date-time=*)
+                date_time="${1#*=}"
+                ;;
+            --date-time)
+                date_time="${2:-}"
+                shift
+                ;;
+
+            --date-from=*)
+                date_from="${1#*=}"
+                ;;
+            --date-from)
+                date_from="${2:-}"
+                shift
+                ;;
+
+            --year=*)
+                year="${1#*=}"
+                ;;
+            --year)
+                year="${2:-}"
+                shift
+                ;;
+
+            --col-start=*)
+                col_start="${1#*=}"
+                ;;
+            --col-start)
+                col_start="${2:-}"
+                shift
+                ;;
+
+            # Processing options
+            --delimiter=*)
+                delimiter="${1#*=}"
+                ;;
+            --delimiter)
+                delimiter="${2:-}"
+                shift
+                ;;
+
+            --cut=*)
+                cut_spec="${1#*=}"
+                ;;
+            --cut)
+                cut_spec="${2:-}"
+                shift
+                ;;
+
+            --del=*)
+                del_patterns+=("${1#*=}")
+                ;;
+            --del)
+                del_patterns+=("${2:-}")
+                shift
+                ;;
+
+            --replace=*)
+                replace_patterns+=("${1#*=}")
+                ;;
+            --replace)
+                replace_patterns+=("${2:-}")
+                shift
+                ;;
+
+            --remove=*)
+                remove_rules+=("${1#*=}")
+                ;;
+            --remove)
+                remove_rules+=("${2:-}")
+                shift
+                ;;
+
+            --change=*)
+                change_rules+=("${1#*=}")
+                ;;
+            --change)
+                change_rules+=("${2:-}")
+                shift
+                ;;
+
+            --case-insensitive)
+                case_insensitive='true'
+                ;;
+
+            # Output options
+            --count)
+                count='true'
+                ;;
+
+            --invert)
+                invert='true'
+                ;;
+
+            --sort=*)
+                sort_mode="${1#*=}"
+                ;;
+            --sort)
+                sort_mode="${2:-}"
+                shift
+                ;;
+
+            --max-lines=*)
+                max_lines="${1#*=}"
+                ;;
+            --max-lines)
+                max_lines="${2:-}"
+                shift
+                ;;
+
+            --output=*)
+                output_file="${1#*=}"
+                ;;
+            --output)
+                output_file="${2:-}"
+                shift
+                ;;
+
+            # Other
+            --verbose)
+                verbose='true'
+                ;;
+
+            --dry-run)
+                dry_run='true'
+                ;;
+
+            # Unknown option
+            --*)
+                _catuniq_error "Unknown option: $1"
+                return 1
+                ;;
+
+            # Positional argument (could be duration or input file)
+            *)
+                # If it looks like a duration and we have no input files yet, treat as duration
+                if [[ "$1" =~ ^[0-9]+[smhd]$ ]] && [[ "${#input_files[@]}" -eq 0 ]]; then
+                    date_time="$1"
+                else
+                    input_files+=("$1")
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    # ============================================================================
+    # VALIDATION
+    # ============================================================================
+
+    # Check required commands
+    for cmd in gawk date; do
+        if ! command -v "$cmd" &>/dev/null; then
+            _catuniq_error "Required command not found: $cmd"
+            return 1
+        fi
+    done
+
+    # Validate date_time format
+    if [[ ! "$date_time" =~ ^[0-9]+[smhd]$ ]]; then
+        _catuniq_error "Invalid date-time format: $date_time (expected: 15m, 1h, etc.)"
+        return 1
+    fi
+
+    # Validate col_start
+    if [[ "$col_start" != "none" ]] && ! [[ "$col_start" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+        _catuniq_error "col-start must be 'none', a number (1), range (1-3), or list (1,2,3), got: $col_start"
+        return 1
+    fi
+
+    # Validate sort_mode
+    if [[ ! "$sort_mode" =~ ^(none|alpha|freq|time)$ ]]; then
+        _catuniq_error "Invalid sort mode: $sort_mode (expected: none, alpha, freq, time)"
+        return 1
+    fi
+
+    # freq sorting requires --count
+    if [[ "$sort_mode" == "freq" ]] && [[ "$count" != "true" ]]; then
+        _catuniq_error "Sort mode 'freq' requires --count option"
+        return 1
+    fi
+
+    # Check input (files or stdin)
+    if [[ "${#input_files[@]}" -eq 0 ]]; then
+        if [[ -t 0 ]]; then
+            _catuniq_error "No input files and stdin is a terminal. Use --help for usage."
+            return 1
+        fi
+        input_files=("-")  # Read from stdin
+    fi
+
+    # ============================================================================
+    # DRY RUN
+    # ============================================================================
+
+    if [[ "$dry_run" == "true" ]]; then
+        cat <<EOF
+Configuration:
+  date_fmt:          $date_fmt
+  date_time:         $date_time
+  date_from:         ${date_from:-current time}
+  year:              ${year:-auto-detect}
+  col_start:         $col_start
+  delimiter:         '$delimiter'
+  cut_spec:          ${cut_spec:-none}
+  del_patterns:      ${del_patterns[*]:-none}
+  replace_patterns:  ${replace_patterns[*]:-none}
+  case_insensitive:  $case_insensitive
+  count:             $count
+  invert:            $invert
+  sort_mode:         $sort_mode
+  max_lines:         ${max_lines:-unlimited}
+  output_file:       ${output_file:-stdout}
+  input_files:       ${input_files[*]}
+EOF
+        return 0
+    fi
+
+    # ============================================================================
+    # COMPUTE TIME THRESHOLD
+    # ============================================================================
+
+    # Parse duration into seconds
+    local duration_seconds
+    case "$date_time" in
+        *s) duration_seconds="${date_time%s}" ;;
+        *m) duration_seconds=$((${date_time%m} * 60)) ;;
+        *h) duration_seconds=$((${date_time%h} * 3600)) ;;
+        *d) duration_seconds=$((${date_time%d} * 86400)) ;;
+    esac
+
+    # Calculate time range based on whether date_from is specified
+    local now_epoch
+    local threshold_epoch
+
+    if [[ -n "$date_from" ]]; then
+        # When date_from is specified: range is [date_from, date_from + date_time]
+        # Normalize date format first
+        local normalized_date
+        normalized_date=$(_catuniq_normalize_date "$date_from" "$year")
+
+        threshold_epoch=$(date -d "$normalized_date" +%s 2>/dev/null)
+        if [[ $? -ne 0 ]]; then
+            _catuniq_error "Invalid date-from format: $date_from (tried: $normalized_date)"
+            return 1
+        fi
+        now_epoch=$((threshold_epoch + duration_seconds))
+    else
+        # When date_from is NOT specified: range is [now - date_time, now]
+        now_epoch=$(date +%s)
+        threshold_epoch=$((now_epoch - duration_seconds))
+    fi
+
+    _catuniq_verbose "now_epoch=$now_epoch, threshold_epoch=$threshold_epoch, duration_seconds=$duration_seconds"
+
+    # ============================================================================
+    # BUILD AWK SCRIPT
+    # ============================================================================
+
+    local awk_script
+    read -r -d '' awk_script <<'AWK_SCRIPT_END'
+BEGIN {
+    # DEBUG
+    if (verbose_mode == "true") {
+        print "[AWK DEBUG] Starting AWK script" > "/dev/stderr"
+        print date_fmt > "/tmp/catuniq_pattern.txt"
+        print "[AWK DEBUG] date_fmt=" date_fmt " (saved to /tmp/catuniq_pattern.txt)" > "/dev/stderr"
+        print "[AWK DEBUG] col_start=" col_start > "/dev/stderr"
+    }
+
+    # Set case sensitivity
+    if (case_insensitive_mode == "true") {
+        IGNORECASE = 1
+    }
+
+    # Set field separator
+    FS = delimiter
+
+    # Parse cut specification
+    if (cut_spec != "") {
+        split(cut_spec, cut_parts, ",")
+        for (i in cut_parts) {
+            # Handle ranges like "1-3"
+            if (match(cut_parts[i], /^([0-9]+)-([0-9]+)$/, range)) {
+                for (j = range[1]; j <= range[2]; j++) {
+                    cut_cols[j] = 1
+                }
+            } else {
+                cut_cols[cut_parts[i]] = 1
+            }
+        }
+    }
+
+    # Parse col_start specification (supports single col, ranges, and lists)
+    if (col_start != "none" && match(col_start, /[,\-]/)) {
+        # Multiple columns specified
+        split(col_start, col_parts, ",")
+        col_count = 0
+        for (i in col_parts) {
+            # Handle ranges like "1-3"
+            if (match(col_parts[i], /^([0-9]+)-([0-9]+)$/, range)) {
+                for (j = range[1]; j <= range[2]; j++) {
+                    col_indices[++col_count] = j
+                }
+            } else {
+                col_indices[++col_count] = col_parts[i]
+            }
+        }
+    }
+
+    # Load delete patterns into array
+    for (i = 1; i <= del_count; i++) {
+        del_patterns[i] = SYMTAB["del_pattern_" i]
+    }
+
+    # Load replace patterns and values into arrays
+    for (i = 1; i <= replace_count; i++) {
+        replace_patterns[i] = SYMTAB["replace_pattern_" i]
+        replace_values[i] = SYMTAB["replace_value_" i]
+    }
+
+    # Load remove column rules into arrays
+    for (i = 1; i <= remove_count; i++) {
+        remove_cols[i] = SYMTAB["remove_col_" i]
+        remove_patterns[i] = SYMTAB["remove_pattern_" i]
+    }
+
+    # Load change column rules into arrays
+    for (i = 1; i <= change_count; i++) {
+        change_cols[i] = SYMTAB["change_col_" i]
+        change_patterns[i] = SYMTAB["change_pattern_" i]
+        change_texts[i] = SYMTAB["change_text_" i]
+    }
+}
+
+{
+    original_line = $0
+
+    # DEBUG: Uncomment to trace each line processing
+    # if (verbose_mode == "true" && NR <= 2) {
+    #     print "[AWK DEBUG] Processing line", NR, ":", $0 > "/dev/stderr"
+    # }
+
+    # Determine where to search for date
+    search_text = ""
+    if (col_start == "none") {
+        search_text = $0
+    } else if (col_count > 0) {
+        # Multiple columns specified - concatenate them
+        search_text = ""
+        for (i = 1; i <= col_count; i++) {
+            col_num = int(col_indices[i])
+            if (col_num > 0 && col_num <= NF) {
+                if (search_text != "") {
+                    search_text = search_text " " $col_num
+                } else {
+                    search_text = $col_num
+                }
+            }
+        }
+        if (search_text == "") {
+            search_text = $0
+        }
+    } else {
+        # Single column specified
+        col_num = int(col_start)
+        if (col_num > 0 && col_num <= NF) {
+            search_text = $col_num
+        } else {
+            search_text = $0
+        }
+    }
+
+    # Extract date using regex
+    if (match(search_text, date_fmt)) {
+        if (verbose_mode == "true" && NR <= 2) {
+            print "[AWK DEBUG] Date matched at", RSTART, "length", RLENGTH > "/dev/stderr"
+        }
+        date_str = substr(search_text, RSTART, RLENGTH)
+        timestamp = ""
+
+        # Try different normalization strategies to parse date
+        # Strategy 0: If --year is specified, try using it for syslog dates first
+        if (force_year != "" && (timestamp == "" || timestamp !~ /^[0-9]+$/)) {
+            # Remove brackets first
+            date_str_normalized = date_str
+            gsub(/[\[\]]/, "", date_str_normalized)
+
+            # For syslog format "MMM DD HH:MM:SS", insert year: "MMM DD YYYY HH:MM:SS"
+            if (match(date_str_normalized, /^([A-Za-z]{3}[[:space:]]+[0-9]{1,2})[[:space:]]+([0-9]{2}:[0-9]{2}:[0-9]{2})/, parts)) {
+                # Insert year between date and time
+                date_with_year = parts[1] " " force_year " " parts[2]
+                cmd = "date -d \"" date_with_year "\" +%s 2>/dev/null"
+                cmd | getline timestamp
+                close(cmd)
+            }
+        }
+
+        # Strategy 1: Try as-is
+        if (timestamp == "" || timestamp !~ /^[0-9]+$/) {
+            cmd = "date -d \"" date_str "\" +%s 2>/dev/null"
+            cmd | getline timestamp
+            close(cmd)
+        }
+
+        # Strategy 2: Remove brackets and try again
+        if (timestamp == "" || timestamp !~ /^[0-9]+$/) {
+            date_str_normalized = date_str
+            gsub(/[\[\]]/, "", date_str_normalized)
+            cmd = "date -d \"" date_str_normalized "\" +%s 2>/dev/null"
+            cmd | getline timestamp
+            close(cmd)
+        }
+
+        # Strategy 3: Replace / with space and first : after year with space
+        if (timestamp == "" || timestamp !~ /^[0-9]+$/) {
+            date_str_normalized = date_str
+            gsub(/[\[\]]/, "", date_str_normalized)
+            # Replace slashes with spaces
+            gsub(/\//, " ", date_str_normalized)
+            # Replace first colon with space (between date and time)
+            sub(/:/, " ", date_str_normalized)
+            cmd = "date -d \"" date_str_normalized "\" +%s 2>/dev/null"
+            cmd | getline timestamp
+            close(cmd)
+        }
+
+        # Strategy 4: For syslog dates without year (e.g., "Dec 25 07:44:17")
+        # If timestamp is valid but far from expected range (>180 days), add year from threshold
+        # Only do this if --year is NOT specified
+        if (force_year == "" && timestamp ~ /^[0-9]+$/) {
+            # Check if timestamp is more than 180 days away from expected range
+            time_diff = timestamp - threshold_epoch
+            if (time_diff < 0) time_diff = -time_diff
+            if (time_diff > 15552000) {  # 180 days in seconds
+                # Extract year from threshold_epoch
+                cmd = "date -d @" threshold_epoch " +%Y 2>/dev/null"
+                cmd | getline year
+                close(cmd)
+
+                if (year ~ /^[0-9]{4}$/) {
+                    # Remove brackets first
+                    date_str_normalized = date_str
+                    gsub(/[\[\]]/, "", date_str_normalized)
+
+                    # Try adding year at the end
+                    cmd = "date -d \"" date_str_normalized " " year "\" +%s 2>/dev/null"
+                    cmd | getline new_timestamp
+                    close(cmd)
+
+                    # If new timestamp is closer to range, use it
+                    if (new_timestamp ~ /^[0-9]+$/) {
+                        new_diff = new_timestamp - threshold_epoch
+                        if (new_diff < 0) new_diff = -new_diff
+                        if (new_diff < time_diff) {
+                            timestamp = new_timestamp
+                        }
+                    }
+                }
+            }
+        }
+
+        # If date parsing failed, skip this line
+        if (timestamp == "" || timestamp !~ /^[0-9]+$/) {
+            next
+        }
+
+        # Check if timestamp is within range [threshold_epoch, now_epoch]
+        if (timestamp < threshold_epoch || timestamp > now_epoch) {
+            if (verbose_mode == "true" && NR <= 2) {
+                print "[AWK DEBUG] Line", NR, "filtered by time:", timestamp, "not in [", threshold_epoch, ",", now_epoch, "]" > "/dev/stderr"
+            }
+            next
+        }
+
+        if (verbose_mode == "true" && NR <= 2) {
+            print "[AWK DEBUG] Line", NR, "passed time filter, timestamp:", timestamp > "/dev/stderr"
+        }
+
+        # Remove date from line
+        modified_line = original_line
+        gsub(date_fmt, "", modified_line)
+
+        if (verbose_mode == "true" && NR <= 2) {
+            print "[AWK DEBUG] After removing date:", modified_line > "/dev/stderr"
+        }
+
+        # Apply cut (remove columns)
+        if (cut_spec != "") {
+            # Re-split the modified line
+            split(modified_line, fields, delimiter)
+            modified_line = ""
+            for (i = 1; i <= length(fields); i++) {
+                if (!(i in cut_cols)) {
+                    modified_line = modified_line (modified_line == "" ? "" : delimiter) fields[i]
+                }
+            }
+        }
+
+        # Trim whitespace before applying column-based rules
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", modified_line)
+        gsub(/[[:space:]]+/, " ", modified_line)
+
+        # Apply remove column rules (remove column if it matches pattern)
+        if (remove_count > 0) {
+            # Re-split the modified line
+            split(modified_line, fields, delimiter)
+            modified_line = ""
+            for (i = 1; i <= length(fields); i++) {
+                # Check if this column should be removed
+                should_remove = 0
+                for (r = 1; r <= remove_count; r++) {
+                    if (i == remove_cols[r] && fields[i] ~ remove_patterns[r]) {
+                        should_remove = 1
+                        break
+                    }
+                }
+                if (!should_remove) {
+                    modified_line = modified_line (modified_line == "" ? "" : delimiter) fields[i]
+                }
+            }
+        }
+
+        # Apply change column rules (change column value if it matches pattern)
+        if (change_count > 0) {
+            # Re-split the modified line
+            split(modified_line, fields, delimiter)
+            for (i = 1; i <= length(fields); i++) {
+                # Check if this column should be changed
+                for (c = 1; c <= change_count; c++) {
+                    if (i == change_cols[c] && fields[i] ~ change_patterns[c]) {
+                        fields[i] = change_texts[c]
+                        break
+                    }
+                }
+            }
+            # Rebuild the line
+            modified_line = ""
+            for (i = 1; i <= length(fields); i++) {
+                modified_line = modified_line (modified_line == "" ? "" : delimiter) fields[i]
+            }
+        }
+
+        # Apply delete patterns (remove matching text)
+        for (i = 1; i <= del_count; i++) {
+            gsub(del_patterns[i], "", modified_line)
+        }
+
+        # Apply replace patterns (replace matching text)
+        for (i = 1; i <= replace_count; i++) {
+            gsub(replace_patterns[i], replace_values[i], modified_line)
+        }
+
+        # Final trim whitespace after text patterns
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", modified_line)
+        gsub(/[[:space:]]+/, " ", modified_line)
+
+        # Skip empty lines
+        if (modified_line == "") {
+            next
+        }
+
+        # Track uniqueness
+        if (count_mode == "true") {
+            seen[modified_line]++
+            if (!(modified_line in first_seen_time)) {
+                first_seen_time[modified_line] = timestamp
+            }
+        } else {
+            if (!(modified_line in seen)) {
+                seen[modified_line] = 1
+                print modified_line
+                print ""
+            }
+        }
+    } else {
+        if (verbose_mode == "true" && NR <= 2) {
+            print "[AWK DEBUG] No date match for line", NR > "/dev/stderr"
+        }
+    }
+}
+
+END {
+    if (count_mode == "true") {
+        for (line in seen) {
+            if (invert_mode == "true") {
+                # Only show duplicates
+                if (seen[line] > 1) {
+                    printf "%d\t%s\n", seen[line], line
+                }
+            } else {
+                printf "%d\t%s\n", seen[line], line
+            }
+        }
+    }
+}
+AWK_SCRIPT_END
+
+    # ============================================================================
+    # BUILD AWK COMMAND WITH -v PARAMETERS
+    # ============================================================================
+
+    local awk_args=()
+    awk_args+=(-v "date_fmt=$date_fmt")
+    awk_args+=(-v "col_start=$col_start")
+    awk_args+=(-v "delimiter=$delimiter")
+    awk_args+=(-v "threshold_epoch=$threshold_epoch")
+    awk_args+=(-v "now_epoch=$now_epoch")
+    awk_args+=(-v "case_insensitive_mode=$case_insensitive")
+    awk_args+=(-v "count_mode=$count")
+    awk_args+=(-v "invert_mode=$invert")
+    awk_args+=(-v "cut_spec=$cut_spec")
+    awk_args+=(-v "del_count=${#del_patterns[@]}")
+    awk_args+=(-v "replace_count=${#replace_patterns[@]}")
+    awk_args+=(-v "remove_count=${#remove_rules[@]}")
+    awk_args+=(-v "change_count=${#change_rules[@]}")
+    awk_args+=(-v "verbose_mode=$verbose")
+    awk_args+=(-v "force_year=$year")
+
+    # Add delete patterns (escape backslashes)
+    for i in "${!del_patterns[@]}"; do
+        local idx=$((i + 1))
+        local pattern_escaped="${del_patterns[$i]//\\/\\\\}"
+        awk_args+=(-v "del_pattern_$idx=$pattern_escaped")
+    done
+
+    # Add replace patterns (escape backslashes, split by ===>)
+    local replace_regex='^(.+)===>(.*)$'
+    for i in "${!replace_patterns[@]}"; do
+        local idx=$((i + 1))
+        local replace_spec="${replace_patterns[$i]}"
+
+        # Split by ===> into pattern and replacement
+        if [[ "$replace_spec" =~ $replace_regex ]]; then
+            local pattern="${BASH_REMATCH[1]}"
+            local replacement="${BASH_REMATCH[2]}"
+            local pattern_escaped="${pattern//\\/\\\\}"
+            local replacement_escaped="${replacement//\\/\\\\}"
+            awk_args+=(-v "replace_pattern_$idx=$pattern_escaped")
+            awk_args+=(-v "replace_value_$idx=$replacement_escaped")
+        else
+            _catuniq_error "Invalid --replace format: $replace_spec (expected: 'pattern===>replacement')"
+            return 1
+        fi
+    done
+
+    # Add remove column rules (split by : into col_num:pattern)
+    local remove_regex='^([0-9]+):(.+)$'
+    for i in "${!remove_rules[@]}"; do
+        local idx=$((i + 1))
+        local remove_spec="${remove_rules[$i]}"
+
+        # Split by : into column number and pattern
+        if [[ "$remove_spec" =~ $remove_regex ]]; then
+            local col_num="${BASH_REMATCH[1]}"
+            local pattern="${BASH_REMATCH[2]}"
+            local pattern_escaped="${pattern//\\/\\\\}"
+            awk_args+=(-v "remove_col_$idx=$col_num")
+            awk_args+=(-v "remove_pattern_$idx=$pattern_escaped")
+        else
+            _catuniq_error "Invalid --remove format: $remove_spec (expected: 'col_num:pattern')"
+            return 1
+        fi
+    done
+
+    # Add change column rules (split by : into col_num:pattern:text, handling escaped colons)
+    for i in "${!change_rules[@]}"; do
+        local idx=$((i + 1))
+        local change_spec="${change_rules[$i]}"
+
+        # Replace escaped colons with placeholder
+        local temp="${change_spec//\\:/__ESCAPED_COLON__}"
+
+        # Split by unescaped colons
+        if [[ "$temp" =~ ^([0-9]+):(.+):(.*)$ ]]; then
+            local col_num="${BASH_REMATCH[1]}"
+            local pattern="${BASH_REMATCH[2]}"
+            local text="${BASH_REMATCH[3]}"
+
+            # Restore escaped colons in pattern and text
+            pattern="${pattern//__ESCAPED_COLON__/:}"
+            text="${text//__ESCAPED_COLON__/:}"
+
+            # Escape backslashes for AWK
+            local pattern_escaped="${pattern//\\/\\\\}"
+            local text_escaped="${text//\\/\\\\}"
+
+            awk_args+=(-v "change_col_$idx=$col_num")
+            awk_args+=(-v "change_pattern_$idx=$pattern_escaped")
+            awk_args+=(-v "change_text_$idx=$text_escaped")
+        else
+            _catuniq_error "Invalid --change format: $change_spec (expected: 'col_num:pattern:text', use \\: to escape colons)"
+            return 1
+        fi
+    done
+
+    # ============================================================================
+    # EXECUTE AWK
+    # ============================================================================
+
+    _catuniq_verbose "Executing: gawk with ${#awk_args[@]} parameters on ${input_files[*]}"
+
+    local awk_output
+    if [[ "${#input_files[@]}" -eq 1 ]] && [[ "${input_files[0]}" == "-" ]]; then
+        awk_output=$(gawk "${awk_args[@]}" "$awk_script")
+    else
+        awk_output=$(gawk "${awk_args[@]}" "$awk_script" "${input_files[@]}")
+    fi
+
+    # ============================================================================
+    # POST-PROCESSING
+    # ============================================================================
+
+    # Apply sorting
+    case "$sort_mode" in
+        alpha)
+            if [[ "$count" == "true" ]]; then
+                # Sort by second column (the text) when counting
+                awk_output=$(echo "$awk_output" | sort -t $'\t' -k2)
+            else
+                awk_output=$(echo "$awk_output" | sort)
+            fi
+            ;;
+        freq)
+            # Sort by frequency (first column, numeric, reverse)
+            awk_output=$(echo "$awk_output" | sort -t $'\t' -k1 -rn)
+            ;;
+        time)
+            # This would require tracking timestamps in AWK
+            # For now, output is in order of first appearance
+            ;;
+        none)
+            # No sorting
+            ;;
+    esac
+
+    # Apply max_lines limit
+    if [[ -n "$max_lines" ]]; then
+        awk_output=$(echo "$awk_output" | head -n "$max_lines")
+    fi
+
+    # Output
+    if [[ -n "$output_file" ]]; then
+        echo "$awk_output" > "$output_file"
+        _catuniq_verbose "Output written to: $output_file"
+    else
+        echo "$awk_output"
+    fi
+}
+
+# If script is executed directly (not sourced), run the function
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    catuniq "$@"
+fi

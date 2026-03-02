@@ -799,6 +799,13 @@ show_changed_files() {
     local out_path="/tmp/new_files/${DATE}"
     local echo_console=''
     local all_cli_args="$*"
+    local date_from=''
+    local date_to=''
+    local from_epoch=0
+    local to_epoch=0
+    local date_filter='cat'
+    local max_depth=''
+    local depth_arg=''
 
     if [ -n "$1" ]; then
         if [[ "$1" != 'help' ]] \
@@ -823,6 +830,9 @@ show_changed_files() {
             --exclude=*) exclude="${1#*=}" ;;
             --old) old_sort=true ;;
             --create) create=true ;;
+            --date-from=*) date_from="${1#*=}" ;;
+            --date-to=*) date_to="${1#*=}" ;;
+            --level=*) max_depth="${1#*=}" ;;            
             *)
                 #ignore
                 ;;
@@ -847,6 +857,22 @@ show_changed_files() {
         sort_date="eval sort -n"
     fi
 
+    if [ -n "$date_from" ]; then
+        from_epoch=$(date -d "$date_from" +%s 2>/dev/null) \
+            || { echo "show_changed_files: invalid --date-from: '$date_from'" >&2; return 1; }
+    fi
+    
+    if [ -n "$date_to" ]; then
+        to_epoch=$(date -d "$date_to" +%s 2>/dev/null) \
+            || { echo "show_changed_files: invalid --date-to: '$date_to'" >&2; return 1; }
+    fi
+
+    if [ "$from_epoch" -ne 0 ] || [ "$to_epoch" -ne 0 ]; then
+        date_filter="awk -v f=${from_epoch} -v t=${to_epoch} '(f==0||\$1>=f)&&(t==0||\$1<=t)'"
+    fi    
+
+    [ -n "$max_depth" ] && depth_arg="-maxdepth $max_depth"
+
     if $create; then
         if [ ! -d ${out_path} ]; then mkdir -p ${out_path}; fi
         check_tee=$(type -P tee)
@@ -861,9 +887,10 @@ show_changed_files() {
         command_output="cat"
     fi
 
-    ${sudo_used} find ${search_path} -type d  \( ${start_exclude_path} \
+    ${sudo_used} find ${search_path} ${depth_arg} -type d  \( ${start_exclude_path} \
                     ${exclude_paths} \) -prune \
                     -o -type f -exec stat -c '%Z %n' {} \; \
+    |eval "${date_filter}" \
     |${sort_date}  |head -n${row_lenght} |cut -d' ' -f2- \
     |${sudo_used} xargs -I{} ls -lhtc --time-style=${iso_format} -- {} \
     |${column} \

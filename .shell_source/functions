@@ -509,7 +509,6 @@ function move_cursor_to_end_line () {
 function show_new_files() {
 # TODO add range search times
 # TODO add --help or -h
-# TODO add naming log install #use arrat for case *
     local change_time=true
     local sort_name=true
     local root_tree=true
@@ -537,6 +536,9 @@ function show_new_files() {
     local last_history=''
     local hist_exclude=''
     local all_cli_args="$*"
+    local add_comment=''
+    local comment_slug=''
+    local out_file=''    
 
 
     if [ -n "$1" ]; then
@@ -562,6 +564,7 @@ function show_new_files() {
             --exclude=*) exclude="${1#*=}" ;;
             --share) no_shares=false ;;
             --all) include_all_dirs=true; no_shares=true ;;
+            --comment=*) add_comment="${1#*=}" ;;
             *)
                 #ignore
                 ;;
@@ -625,7 +628,15 @@ function show_new_files() {
     if $no_create; then
         command_output="cat"
     else
+        if [ -n "$add_comment" ]; then
+            comment_slug="_$(echo "$add_comment" \
+                |tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '_' \
+                |sed 's/^_//; s/_$//' | cut -c1-20)"
+        fi
+        out_file="changed_from_${TIME}_last_${minits}_min${comment_slug}"
+
         if [ ! -d ${out_path} ]; then mkdir -p ${out_path}; fi
+        find /tmp/new_files -type d -exec chmod 0777 {} +
         check_tee=$(type -P tee)
         if [[ $? == 0 ]];
             then new_cat='tee -a'
@@ -649,10 +660,10 @@ function show_new_files() {
           tail -n10
         )
 
-        echo "$(date '+%F %H:%M:%S')" > ${out_path}/changed_from_${TIME}_last_${minits}_min
-        echo -e "args: ${all_cli_args} \n ${last_history} \n " >> ${out_path}/changed_from_${TIME}_last_${minits}_min
-        command_output="$new_cat ${out_path}/changed_from_${TIME}_last_${minits}_min"
-        echo_console="saved output in ${out_path}/changed_from_${TIME}_last_${minits}_min"
+        echo "$(date '+%F %H:%M:%S')${add_comment:+ ${add_comment}}" > ${out_path}/${out_file}
+        echo -e "args: ${all_cli_args} \n ${last_history} \n " >> ${out_path}/${out_file}
+        command_output="$new_cat ${out_path}/${out_file}"
+        echo_console="saved output in ${out_path}/${out_file}"        
     fi
 
     ${sudo_used} find ${search_path} -type d  \( ${start_exclude_path} ${exclude_def} \
@@ -678,6 +689,7 @@ function show_new_files() {
     }' \
     |sort ${sort_args} \
     |eval "$( echo ${command_output} )"
+    [ -n "$out_file" ] && [ -f "${out_path}/${out_file}" ] && chmod 0444 "${out_path}/${out_file}"
     echo -e "\n\033[0;32m ${echo_console} \033[0m"
 
 #| **Sort Key**      | **Description**                                                                     |

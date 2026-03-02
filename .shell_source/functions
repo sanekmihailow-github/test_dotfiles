@@ -1388,6 +1388,19 @@ if [ -d "$HOME/.shell_source/ext_functions" ]; then
     done
 fi
 
+seb() {
+    local sudo_used=''
+    local cmd="${*//\"/\\\"}"
+    if $(sudo -v); then sudo_used='sudo'; fi
+    ${sudo_used} sudo bash -c "$cmd"
+}
+
+ses() {
+    local sudo_used=''
+    local cmd="${*//\"/\\\"}"
+    if $(sudo -v); then sudo_used='sudo'; fi
+    ${sudo_used} sudo sh -c "$cmd"
+}
 
 myfunctions_aliases () {
     echo -e '
@@ -1480,7 +1493,7 @@ OTHER:
         extract cat_z
         defcat              - /usr/bin/cat
         scriptformat        - remove ansci unprintable cahracters
-        se                  - short sudo
+        se, ses, seb        - short sudo
         sq, plz, sr, l1
         maketar
         makezip

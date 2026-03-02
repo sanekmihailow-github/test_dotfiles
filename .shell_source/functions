@@ -811,15 +811,41 @@ addBackup() {
                 else ${sudo_used} tar czfp ${backup_path}_${num}.tar.gz ${backup_path}
             fi
         else
-            check_previous="$(2>/dev/null ls -a ${backup_path}* |egrep '\.bak[0-9]*' 2> /dev/null)"
+            check_previous="$(2>/dev/null ls -a ${backup_path}* |egrep '\.bak[0-9]+\.bak' 2> /dev/null)"
             if [ -n "$check_previous" ]; then
                 check_num=$(echo "$check_previous" |wc -l)
             fi
             num=$(expr $check_num + 1)
-            ${sudo_used} cp -a ${backup_path} ${backup_path}.bak${num}
-            ${sudo_used} chmod 0444 ${backup_path}.bak${num}
+            ${sudo_used} cp -a ${backup_path} ${backup_path}.bak${num}.bak
+
+            if echo "$check_type" | grep -qi 'text\|script'; then
+                local ext="${1##*.}"
+                local comment_prefix='#'
+                local comment_suffix=''
+
+                case "${ext,,}" in
+                    js|ts|java|c|cpp|cc|h|hpp|go|rs|swift|kt|cs|php)
+                        comment_prefix='//' ;;
+                    html|htm|xml|svg|xhtml)
+                        comment_prefix='<!--'; comment_suffix=' -->' ;;
+                    css|scss|less)
+                        comment_prefix='/*'; comment_suffix=' */' ;;
+                    sql|lua)
+                        comment_prefix='--' ;;
+                    tex|sty|cls)
+                        comment_prefix='%' ;;
+                esac
+
+                local date_str="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+                local comment_line="${comment_prefix} Backup created: ${date_str}${comment_suffix}"
+                local tmpfile="$(mktemp)"
+                { echo "${comment_line}"; ${sudo_used} cat "${backup_path}.bak${num}.bak"; } > "${tmpfile}"
+                ${sudo_used} mv "${tmpfile}" "${backup_path}.bak${num}.bak"
+            fi
+
+            ${sudo_used} chmod 0444 ${backup_path}.bak${num}.bak
             if [ -n "$check_exist_chattr" ]; then
-                ${sudo_used} chattr +A ${backup_path}.bak${num}
+                ${sudo_used} chattr +A ${backup_path}.bak${num}.bak
             fi
     fi
 }

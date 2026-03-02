@@ -609,14 +609,14 @@ EOF
     }
 
     if [ -n "$1" ]; then
-        if [[ "$1" =~ ^[0-9]+$ ]]; then
+        if [[ "$1" =~ ^([0-9]+)([smhd]?)$ ]]; then
             local num="${BASH_REMATCH[1]}"
             local unit="${BASH_REMATCH[2]:-m}"
             case "$unit" in
                 s) minits=$(awk "BEGIN{printf \"%.4f\", $num/60}") ;;
                 m) minits=$num ;;
                 h) minits=$(( num * 60 )) ;;
-                d) minits=$(( num * 1440
+                d) minits=$(( num * 1440 )) ;;
             esac
             duration_label="${num}${unit}"
         fi
@@ -640,7 +640,7 @@ EOF
             --share) no_shares=false ;;
             --all) include_all_dirs=true; no_shares=true ;;
             --comment=*) add_comment="${1#*=}" ;;
-            -h|--help) _show_new_files_help; return 0 ;;
+            -h|--help) _show_new_files_help; return ;;
             *)
                 #ignore
                 ;;
@@ -806,6 +806,66 @@ show_changed_files() {
     local date_filter='cat'
     local max_depth=''
     local depth_arg=''
+    local help_text
+
+    help_text=$(cat <<'EOF'
+show_changed_files - Show recently changed files sorted by change time
+
+USAGE:
+    show_changed_files [PATH] [OPTIONS]
+
+ARGUMENTS:
+    PATH                Directory to search (default: current directory .)
+
+OPTIONS:
+    Output:
+        --head=N        Limit output to N results (default: 25)
+        --lenght=N      Alias for --head=N
+        --nocolumn      Disable column alignment (use tab instead)
+        --date-format=FMT  Date format for ls --time-style (default: long-iso)
+                           Examples: long-iso, full-iso, iso, +%F\ %T
+
+    Sorting:
+        --old           Show oldest files first (default: newest first)
+
+    Search Scope:
+        --level=N       Limit directory depth (find -maxdepth N)
+        --exclude=PATHS Space-separated list of paths to exclude
+
+    Date Filter:
+        --date-from=DATE  Show files changed on or after DATE
+                          Format: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS"
+                          Without --date-to: from DATE to now
+        --date-to=DATE    Show files changed on or before DATE
+                          Without --date-from: from beginning to DATE
+                          Both together: exact date range
+
+    Log:
+        --create        Save output to /tmp/new_files/YYYY-MM-DD/
+
+    Other:
+        -h, --help      Show this help message
+
+EXAMPLES:
+    # Recently changed files in current dir
+    show_changed_files
+
+    # Search /etc, show 50 results
+    show_changed_files /etc --head=50
+
+    # Files changed since March 1st
+    show_changed_files --date-from="2026-03-01"
+
+    # Files changed in a specific range
+    show_changed_files /var --date-from="2026-03-01" --date-to="2026-03-02 12:00"
+
+    # Only top-level files, oldest first
+    show_changed_files /etc --level=1 --old
+
+    # Search and save to log
+    show_changed_files /etc --create
+EOF
+)
 
     if [ -n "$1" ]; then
         if [[ "$1" != 'help' ]] \
@@ -832,7 +892,8 @@ show_changed_files() {
             --create) create=true ;;
             --date-from=*) date_from="${1#*=}" ;;
             --date-to=*) date_to="${1#*=}" ;;
-            --level=*) max_depth="${1#*=}" ;;            
+            --level=*) max_depth="${1#*=}" ;;
+            -h|--help|help) echo "$help_text"; return ;;
             *)
                 #ignore
                 ;;

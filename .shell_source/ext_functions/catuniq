@@ -69,6 +69,7 @@ catuniq() {
     local invert='false'
     local verbose='false'
     local dry_run='false'
+    local save_mode='false'
 
     # Sorting and output
     local sort_mode='none'  # none, alpha, freq, time
@@ -80,7 +81,7 @@ catuniq() {
 
     # ============================================================================
     # HELPER FUNCTIONS
-    # ============================================================================
+    # =====================local save_mode='false'=======================================================
 
     _catuniq_error() {
         echo "[ERROR] $*" >&2
@@ -198,34 +199,34 @@ DURATION:
 OPTIONS:
     Date/Time Options:
         --date-fmt=REGEX        Regex pattern to match date in logs
-                                (default: nginx format)
+                                 (default: nginx format)
         --date-time=DURATION    Time window to filter (default: 5m)
-                                Format: 15s, 5m, 2h, 1d
+                                 Format: 15s, 5m, 2h, 1d
         --date-from=DATETIME    Reference time (default: current time)
         --year=YYYY             Explicit year for syslog dates (e.g., 2025)
-                                Overrides automatic year detection
+                                 Overrides automatic year detection
         --col-start=SPEC        Column(s) with date (default: 1)
-                                Single: 1, Multiple: 1,2,3, Range: 1-3
-                                Use 'none' to search entire line
+                                 Single: 1, Multiple: 1,2,3, Range: 1-3
+                                 Use 'none' to search entire line
 
     Processing Options:
         --delimiter=CHAR        Field delimiter (default: space)
         --cut=SPEC              Remove columns (e.g., 1,3,5 or 1-3,5)
         --del=PATTERN           Delete matching regex pattern (can be used multiple times)
         --replace=PATTERN===>REPL Replace regex pattern with string
-                                Format: 'pattern===>replacement'
-                                Can be used multiple times
-                                Example: --replace 'ERROR===>WARN'
+                                 Format: 'pattern===>replacement'
+                                 Can be used multiple times
+                                 Example: --replace 'ERROR===>WARN'
         --remove=COL:PATTERN    Remove column if it matches pattern
-                                Format: 'column_num:pattern'
-                                Can be used multiple times
-                                Example: --remove '3:[0-9]{1,4}' --remove '7:eth[0-9]'
+                                 Format: 'column_num:pattern'
+                                 Can be used multiple times
+                                 Example: --remove '3:[0-9]{1,4}' --remove '7:eth[0-9]'
         --change=COL:PATTERN:TEXT Change column value if it matches pattern
-                                Format: 'column_num:pattern:replacement'
-                                Escape colons in pattern with \:
-                                Can be used multiple times
-                                Example: --change '3:ERROR:WARN' --change '5:db_error\:.*:DB_ERR'
-        --case-insensitive      Ignore case when determining uniqueness
+                                 Format: 'column_num:pattern:replacement'
+                                 Escape colons in pattern with \:
+                                 Can be used multiple times
+                                 Example: --change '3:ERROR:WARN' --change '5:db_error\:.*:DB_ERR'
+        --case-insensitive       Ignore case when determining uniqueness
 
     Output Options:
         --count                 Show occurrence count for each unique line
@@ -233,6 +234,8 @@ OPTIONS:
         --sort=MODE             Sort output: none, alpha, freq, time
         --max-lines=N           Limit output to N lines
         --output=FILE           Write output to file instead of stdout
+        --save                  Keep timestamps in output and write to
+                                 /tmp/<filename>_save (does not strip dates)
 
     Other:
         --verbose               Enable verbose debug output
@@ -431,6 +434,9 @@ EOF
                 output_file="${2:-}"
                 shift
                 ;;
+            --save)
+                save_mode='true'
+                ;;
 
             # Other
             --verbose)
@@ -505,6 +511,17 @@ EOF
         input_files=("-")  # Read from stdin
     fi
 
+    # Auto-set output file when --save is used
+    if [[ "$save_mode" == 'true' ]]; then
+        local save_name
+        if [[ "${input_files[0]}" == "-" ]]; then
+            save_name="catuniq"
+        else
+            save_name=$(basename "${input_files[0]}")
+        fi
+        output_file="/tmp/${save_name}_save"
+    fi
+
     # ============================================================================
     # DRY RUN
     # ============================================================================
@@ -527,6 +544,7 @@ Configuration:
   sort_mode:         $sort_mode
   max_lines:         ${max_lines:-unlimited}
   output_file:       ${output_file:-stdout}
+  save_mode:         $save_mode
   input_files:       ${input_files[*]}
 EOF
         return 0
@@ -793,9 +811,11 @@ BEGIN {
             print "[AWK DEBUG] Line", NR, "passed time filter, timestamp:", timestamp > "/dev/stderr"
         }
 
-        # Remove date from line
+        # Remove date from line (unless --save mode keeps timestamps)
         modified_line = original_line
-        gsub(date_fmt, "", modified_line)
+        if (keep_date_mode != "true") {
+            gsub(date_fmt, "", modified_line)
+        }
 
         if (verbose_mode == "true" && NR <= 2) {
             print "[AWK DEBUG] After removing date:", modified_line > "/dev/stderr"
@@ -932,6 +952,7 @@ AWK_SCRIPT_END
     awk_args+=(-v "change_count=${#change_rules[@]}")
     awk_args+=(-v "verbose_mode=$verbose")
     awk_args+=(-v "force_year=$year")
+	awk_args+=(-v "keep_date_mode=$save_mode")
 
     # Add delete patterns (escape backslashes)
     for i in "${!del_patterns[@]}"; do
@@ -1058,7 +1079,10 @@ AWK_SCRIPT_END
     # Output
     if [[ -n "$output_file" ]]; then
         echo "$awk_output" > "$output_file"
-        _catuniq_verbose "Output written to: $output_file"
+        if [[ "$save_mode" == 'true' ]]
+			then echo -e  "\033[0;32m Saved: $output_file \033[0m"
+        	else _catuniq_verbose "\033[0;32m Output written to: $output_file \033[0m"
+        fi
     else
         echo "$awk_output"
     fi

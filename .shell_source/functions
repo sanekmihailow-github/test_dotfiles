@@ -1072,9 +1072,9 @@ function docker_log() {
             echo -e "==================== LOGS for ${1} =====================: \n\n"
             while true; do
                 part_line="$(
-                    printf '\n'; printf '%.0s-' {1..50}; \
+                    printf '\n'; printf '%.0s-' {1..30}; \
                     printf '  %s  ' "$(date '+%A %B %d   %H:%M:%S %Y %Z')"; \
-                    printf '%.0s-' {1..50}; printf '\n'
+                    printf '%.0s-' {1..30}; printf '\n'
                 )"
 
                 if [[ "$output_format" =~ ^json ]] && command -v jq &>/dev/null
@@ -1195,9 +1195,9 @@ journal_log () {
     echo -e "==================== LOGS for ${unit} =====================\n"
     while true; do
         part_line="$(
-            printf '\n'; printf '%.0s-' {1..50}; \
+            printf '\n'; printf '%.0s-' {1..30}; \
             printf '  %s  ' "$(date '+%A %B %d   %H:%M:%S %Y %Z')"; \
-            printf '%.0s-' {1..50}; printf '\n'
+            printf '%.0s-' {1..30}; printf '\n'
         )"
 
         if [[ "$output_format" =~ ^json ]] && command -v jq &>/dev/null

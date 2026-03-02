@@ -520,6 +520,7 @@ function show_new_files() {
     local include_all_dirs=false
 
     local minits=60
+    local duration_label='60m'
     local DATE="$(date +%F)"
     local TIME="$(date +%Hh-%Mm-%Ss)"
     local out_path="/tmp/new_files/${DATE}"
@@ -543,7 +544,15 @@ function show_new_files() {
 
     if [ -n "$1" ]; then
         if [[ "$1" =~ ^[0-9]+$ ]]; then
-            minits=${1}
+            local num="${BASH_REMATCH[1]}"
+            local unit="${BASH_REMATCH[2]:-m}"
+            case "$unit" in
+                s) minits=$(awk "BEGIN{printf \"%.4f\", $num/60}") ;;
+                m) minits=$num ;;
+                h) minits=$(( num * 60 )) ;;
+                d) minits=$(( num * 1440
+            esac
+            duration_label="${num}${unit}"
         fi
     fi
 
@@ -633,7 +642,7 @@ function show_new_files() {
                 |tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '_' \
                 |sed 's/^_//; s/_$//' | cut -c1-20)"
         fi
-        out_file="changed_from_${TIME}_last_${minits}_min${comment_slug}"
+        out_file="changed_from_${TIME}_last_${duration_label}${comment_slug}"
 
         if [ ! -d ${out_path} ]; then mkdir -p ${out_path}; fi
         find /tmp/new_files -type d -exec chmod 0777 {} +

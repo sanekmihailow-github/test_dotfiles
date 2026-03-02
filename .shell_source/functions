@@ -508,7 +508,6 @@ function move_cursor_to_end_line () {
 
 function show_new_files() {
 # TODO add range search times
-# TODO add --help or -h
     local change_time=true
     local sort_name=true
     local root_tree=true
@@ -541,6 +540,73 @@ function show_new_files() {
     local comment_slug=''
     local out_file=''    
 
+    _show_new_files_help() {
+        cat <<'EOF'
+show_new_files - Find recently changed/created files on the system
+
+USAGE:
+    show_new_files [DURATION] [OPTIONS]
+
+ARGUMENTS:
+    DURATION            Time window to search (default: 60m)
+                        Format: NUMBER[s|m|h|d]
+                          s - seconds   (e.g.: 30s)
+                          m - minutes   (e.g.: 45m, or just 45)
+                          h - hours     (e.g.: 2h)
+                          d - days      (e.g.: 1d)
+                        No suffix = minutes. Examples: 30 == 30m, 2h == 120m
+
+OPTIONS:
+    Time Options:
+        --modify-time   Use file modification time (mtime) instead of
+                        change time (ctime, default)
+        --sort-time     Sort results by time (default: sort by name)
+
+    Search Scope:
+        --dir           Search current directory only (default: whole filesystem /)
+        --all           Include all directories: /proc /sys /dev /run
+                        /var/lib/docker .git (default: excluded)
+        --share         Include network shares: cifs, nfs, 9p mounts
+                        (default: excluded)
+        --exclude=PATHS Space-separated list of paths to exclude
+                        Example: --exclude="/var/cache /home/user"
+
+    Output / Log:
+        --no-create     Print to stdout only, do not save log file
+                        (default: save to /tmp/new_files/YYYY-MM-DD/)
+        --comment=TEXT  Attach a comment to this run:
+                          - Full text written as first line of log file
+                          - Truncated slug appended to log filename
+                        Example: --comment="after nginx install"
+
+    Other:
+        -h, --help      Show this help message
+
+OUTPUT FILE:
+    Saved to: /tmp/new_files/YYYY-MM-DD/changed_from_HHh-MMm-SSs_last_DURATION[_slug]
+    Directory permissions: 0777 (world-writable)
+    File permissions:      0444 (read-only)
+
+EXAMPLES:
+    # Files changed in last 30 minutes (whole system)
+    show_new_files 30
+
+    # Files changed in last hour, sort by time
+    show_new_files 60 --sort-time
+
+    # Search current dir only, no log file
+    show_new_files 10 --dir --no-create
+
+    # Include network shares, exclude /home
+    show_new_files 60 --share --exclude="/home"
+
+    # Label this run with a comment
+    show_new_files 30 --comment="before package update"
+
+    # Use modification time, include all dirs
+    show_new_files 120 --modify-time --all
+EOF
+    }
 
     if [ -n "$1" ]; then
         if [[ "$1" =~ ^[0-9]+$ ]]; then
@@ -574,6 +640,7 @@ function show_new_files() {
             --share) no_shares=false ;;
             --all) include_all_dirs=true; no_shares=true ;;
             --comment=*) add_comment="${1#*=}" ;;
+            -h|--help) _show_new_files_help; return 0 ;;
             *)
                 #ignore
                 ;;

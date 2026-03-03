@@ -1026,6 +1026,45 @@ addBackup() {
     fi
 }
 
+addVers() {
+# save versioned copy of file to /tmp/versions/<cur_path>/<file>_versN
+    if [ -z "$1" ]; then
+        echo "Error: file not specified" >&2
+        echo "Usage: addVers <file>" >&2
+        return 1
+    fi
+
+    local filepath
+    if [[ "$1" = /* ]]; then
+        filepath="$1"
+    else
+        filepath="${PWD}/${1}"
+    fi
+
+    if [ ! -f "$filepath" ]; then
+        echo "Error: file '$1' does not exist" >&2
+        return 1
+    fi
+
+    local filename="$(basename "$filepath")"
+    local dirpath="$(dirname "$filepath")"
+    local vers_dir="/tmp/versions${dirpath}"
+    local check_num=0
+    local num=1
+
+    mkdir -p "$vers_dir"
+    local check_previous
+    check_previous="$(ls "${vers_dir}/${filename}_vers"[0-9]* 2>/dev/null)"
+    if [ -n "$check_previous" ]; then
+        check_num=$(echo "$check_previous" | wc -l)
+        num=$(expr $check_num + 1)
+    fi
+
+    local vers_path="${vers_dir}/${filename}_vers${num}"
+    cp -a "$filepath" "$vers_path"
+    echo "Saved: ${vers_path}"
+}
+
 
 function docker_inspect() {
 #docker inspect with
@@ -1645,7 +1684,12 @@ DOCKER:
         docker_inspect
 
 SYNC:
-       scpresume
+        scpresume
+
+BACKUP/COPY:
+        addBackup, addVers
+        pbcopy, pbpaste
+
 
 HIGHLIGHTS:
         gulimit             - highlight ulimit
@@ -1682,7 +1726,6 @@ OTHER:
         sprunge, phpinfo_e
         speedt, speedt1, speeddown
         locru, locen, lessr, jobs, renull
-        pbcopy, pbpaste
 
     '
 }

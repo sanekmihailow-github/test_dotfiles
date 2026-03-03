@@ -1065,6 +1065,228 @@ addVers() {
     echo "Saved: ${vers_path}"
 }
 
+addGit() {
+# create local git repository and track files
+# Usage: addGit [--path <path>] [--repo <name>] [--comment <msg>] [--branch <name>] [--diff] [files...]
+# --path required only on first init; repo auto-detected from file paths on subsequent calls
+    local path=""
+    local repo=""
+    local comment=""
+    local branch="master"
+    local do_diff=false
+    local files=()
+    local sudo_used=''
+    local help_text
+
+    help_text=$(cat <<'EOF'
+USAGE:
+    addGit [--path <path>] [--repo <name>] [--comment <msg>] [--branch <name>] [--diff] [files...]
+
+ARGUMENTS:
+    files...   Files to track (relative to --path or absolute)
+
+OPTIONS:
+    --path     Root path to track (required for first init only)
+    --repo     Repository name (default: basename of --path)
+    --comment  Commit message (default: current date)
+    --branch   Branch name (default: master)
+    --diff     Show diff vs tracked file only (no copy/commit)
+
+On existing repos --path and --repo are optional:
+repo is auto-detected by matching file paths against README.md records.
+Repository location: ~/DOWNLOAD/local_GIT/<repo_name>
+EOF
+)
+
+    if [[ $EUID -ne 0 ]]; then
+        if sudo -v 2>/dev/null; then sudo_used='sudo'; fi
+    fi
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --path=*)    path="${1#*=}" ;;
+            --path)      path="$2"; shift ;;
+            --repo=*)    repo="${1#*=}" ;;
+            --repo)      repo="$2"; shift ;;
+            --comment=*) comment="${1#*=}" ;;
+            --comment)   comment="$2"; shift ;;
+            --branch=*)  branch="${1#*=}" ;;
+            --branch)    branch="$2"; shift ;;
+            --diff)      do_diff=true ;;
+            -h|--help)   echo "$help_text"; return ;;
+            --*) echo "Error: unknown option '$1'" >&2; return 1 ;;
+            *)   files+=("$1") ;;
+        esac
+        shift
+    done
+
+    [ -n "$path" ] && path="${path%/}"
+    [ -z "$comment" ] && comment="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    local git_home
+    if [ -n "$SUDO_USER" ]; then
+        git_home="/home/${SUDO_USER}"
+    else
+        git_home="/home/${USER}"
+    fi
+    local local_GIT_dir="${git_home}/DOWNLOAD/local_GIT"
+
+    # --- Resolve repo + path ---
+
+    # --path given, --repo not → repo = basename(path)
+    [ -z "$repo" ] && [ -n "$path" ] && repo="$(basename "$path")"
+
+    # --repo given, --path not → read path from existing repo's README.md
+    if [ -n "$repo" ] && [ -z "$path" ] && [ -f "${local_GIT_dir}/${repo}/README.md" ]; then
+        path="$(head -1 "${local_GIT_dir}/${repo}/README.md")"
+        path="${path%/}"
+    fi
+
+    # neither given → auto-detect repo by matching first file's abs path against all README.md
+    if [ -z "$repo" ] && [ -z "$path" ]; then
+        if [ ${#files[@]} -eq 0 ]; then
+            echo "Error: specify --path to create a repo, or provide files for auto-detection" >&2
+            echo "Run: addGit --help" >&2
+            return 1
+        fi
+        local _probe="${files[0]}"
+        [[ "$_probe" != /* ]] && _probe="${PWD}/${_probe}"
+        if [ -d "$local_GIT_dir" ]; then
+            local _readme _cand
+            for _readme in "${local_GIT_dir}"/*/README.md; do
+                [ -f "$_readme" ] || continue
+                _cand="$(head -1 "$_readme")"
+                _cand="${_cand%/}"
+                if [[ "$_probe" == "${_cand}/"* ]] || [[ "$_probe" == "$_cand" ]]; then
+                    repo="$(basename "$(dirname "$_readme")")"
+                    path="$_cand"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$repo" ]; then
+            echo "Error: no repository found for '${files[0]}'" >&2
+            echo "Use --path <root> to create a new repository" >&2
+            return 1
+        fi
+        echo "Auto-detected: repo='${repo}'  path='${path}'"
+    fi
+
+    local git_dir="${local_GIT_dir}/${repo}"
+
+    # --repo given but repo doesn't exist and no --path → can't init
+    if [ -z "$path" ]; then
+        echo "Error: repository '${repo}' not found — use --path for initial setup" >&2
+        return 1
+    fi
+
+    # resolve absolute path from file argument
+    _ag_abspath() {
+        if [[ "$1" = /* ]]; then echo "$1"
+        else echo "${path}/${1}"; fi
+    }
+
+    # resolve relative path inside git repo
+    _ag_relpath() {
+        if [[ "$1" == "${path}/"* ]]; then echo "${1#${path}/}"
+        else echo "${1#/}"; fi
+    }
+    # --- --diff mode: show diff only, no copy/commit ---
+    if $do_diff; then
+        if [ ! -d "${git_dir}/.git" ]; then
+            echo "Error: repository '${repo}' not found at ${git_dir}" >&2
+            unset -f _ag_abspath _ag_relpath
+            return 1
+        fi
+
+        if [ ${#files[@]} -eq 0 ]; then
+            echo "Error: specify at least one file for --diff" >&2
+            unset -f _ag_abspath _ag_relpath
+            return 1
+        fi
+
+        local abs_file rel_path tracked
+        for f in "${files[@]}"; do
+            abs_file="$(_ag_abspath "$f")"
+            rel_path="$(_ag_relpath "$abs_file")"
+            tracked="${git_dir}/${rel_path}"
+
+            if [ "$(basename "$abs_file")" != "$(basename "$tracked")" ]; then
+                echo "Error: filename mismatch — '$(basename "$abs_file")' vs '$(basename "$tracked")'" >&2
+                continue
+            fi
+            if [ ! -f "$abs_file" ]; then
+                echo "Error: file not found: $abs_file" >&2; continue
+            fi
+            if [ ! -f "$tracked" ]; then
+                echo "Error: not tracked in repo: $tracked" >&2; continue
+            fi
+            echo -e "\033[0;36m${abs_file}  ${tracked}\033[0m"
+            echo -e "\033[0;33m--- ${abs_file}\033[0m"
+            echo -e "\033[0;33m+++ ${tracked}\033[0m"
+            diff -Zbw "$abs_file" "$tracked"
+        done
+        unset -f _ag_abspath _ag_relpath
+        return 0
+    fi
+
+    # --- Create or reuse repo ---
+    local prev_dir="$PWD"
+    local repo_new=false
+
+    if [ ! -d "${git_dir}/.git" ]; then
+        repo_new=true
+        mkdir -p "$git_dir" || { echo "Error: cannot create $git_dir" >&2; unset -f _ag_abspath _ag_relpath; return 1; }
+        cd "$git_dir" || { unset -f _ag_abspath _ag_relpath; return 1; }
+        git init
+        git symbolic-ref HEAD "refs/heads/${branch}"
+        echo "$path" > README.md
+        git add README.md
+        echo "Created repository: ${git_dir}  [branch: ${branch}]"
+    else
+        cd "$git_dir" || { unset -f _ag_abspath _ag_relpath; return 1; }
+        local cur_branch
+        cur_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+        if [ "$cur_branch" != "$branch" ]; then
+            git checkout "$branch" 2>/dev/null || git checkout -b "$branch" 2>/dev/null
+        fi
+        echo "Using existing repository: ${git_dir}  [branch: ${branch}]"
+    fi
+
+    # --- Copy and stage files ---
+    local abs_file rel_path dest dest_dir
+    for f in "${files[@]}"; do
+        abs_file="$(_ag_abspath "$f")"
+
+        if [ ! -f "$abs_file" ]; then
+            echo "Warning: '$abs_file' is not a file or does not exist, skipping" >&2; continue
+        fi
+        if [ ! -s "$abs_file" ]; then
+            echo "Warning: '$abs_file' is empty, skipping" >&2; continue
+        fi
+
+        rel_path="$(_ag_relpath "$abs_file")"
+        dest="${git_dir}/${rel_path}"
+        dest_dir="$(dirname "$dest")"
+
+        mkdir -p "$dest_dir" || { echo "Error: cannot create $dest_dir" >&2; continue; }
+        ${sudo_used} cp -a "$abs_file" "$dest" || { echo "Error: cannot copy $abs_file" >&2; continue; }
+        git add "$dest"
+        echo "Tracked: $dest"
+    done
+
+    # --- Commit ---
+    if git diff --cached --quiet 2>/dev/null; then
+        echo "Nothing new to commit"
+    else
+        ${repo_new} && git commit -m "init repo" || git commit -m "$comment"
+        echo -e "\033[0;32mDone: ${git_dir}  [branch: ${branch}]\033[0m"
+    fi
+
+    cd "$prev_dir" 2>/dev/null || true
+    unset -f _ag_abspath _ag_relpath
+}
+
 
 function docker_inspect() {
 #docker inspect with
@@ -1687,9 +1909,10 @@ SYNC:
         scpresume
 
 BACKUP/COPY:
-        addBackup, addVers
-        pbcopy, pbpaste
-
+        addBackupa          - backup file/dir (.bak<N>.bak or .tar.gz)
+        addVers             - version file to /tmp/versions/<path>/<file>_vers<N>
+        addGit              - track file/s in local git repo ~/DOWNLOAD/local_GIT/<repo>
+        pbcopy, pbpaste     - copy / paste for / from clipboard
 
 HIGHLIGHTS:
         gulimit             - highlight ulimit

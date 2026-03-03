@@ -115,26 +115,33 @@ incognito() {
 }
 
 extract () {
-  if [ -f $1 ] ; then
-      case $1 in
-          *.tar.bz2)   tar xvjf $1    ;;
-          *.tar.gz)    tar xvzf $1    ;;
-          *.tar.xz)   tar -xpJf $1    ;;
-          *.bz2)       bunzip2 $1     ;;
-          *.rar)       rar x $1       ;;
-          *.gz)        gunzip $1      ;;
-          *.xz)        unxz $1        ;;
-          *.tar)       tar xvf $1     ;;
-          *.tbz2)      tar xvjf $1    ;;
-          *.tgz)       tar xvzf $1    ;;
-          *.zip)       unzip $1       ;;
-          *.Z)         uncompress $1  ;;
-          *.7z)        7z x $1        ;;
-          *)           echo "don't know how to extract '$1'..." ;;
-      esac
-  else
-      echo "'$1' is not a valid file!"
+#    
+  if [ -z "$1" ]; then
+    echo "Usage: extract <file>" >&2
+    return 1
   fi
+
+  if [ ! -f "$1" ]; then
+      echo "'$1' is not a valid file!" >&2
+      return 1
+  fi
+
+  case $1 in
+      *.tar.bz2)   tar xvjf $1    ;;
+      *.tar.gz)    tar xvzf $1    ;;
+      *.tar.xz)   tar -xpJf $1    ;;
+      *.bz2)       bunzip2 $1     ;;
+      *.rar)       rar x $1       ;;
+      *.gz)        gunzip $1      ;;
+      *.xz)        unxz $1        ;;
+      *.tar)       tar xvf $1     ;;
+      *.tbz2)      tar xvjf $1    ;;
+      *.tgz)       tar xvzf $1    ;;
+      *.zip)       unzip $1       ;;
+      *.Z)         uncompress $1  ;;
+      *.7z)        7z x $1        ;;
+      *)           echo "don't know how to extract '$1'..." >&2; return 1 ;;
+  esac
 }
 
 defcat() {
@@ -508,8 +515,6 @@ function move_cursor_to_end_line () {
 
 function show_new_files() {
 # TODO add range search times
-# TODO add --help or -h
-# TODO add naming log install #use arrat for case *
     local change_time=true
     local sort_name=true
     local root_tree=true
@@ -521,6 +526,7 @@ function show_new_files() {
     local include_all_dirs=false
 
     local minits=60
+    local duration_label='60m'
     local DATE="$(date +%F)"
     local TIME="$(date +%Hh-%Mm-%Ss)"
     local out_path="/tmp/new_files/${DATE}"
@@ -537,11 +543,89 @@ function show_new_files() {
     local last_history=''
     local hist_exclude=''
     local all_cli_args="$*"
+    local add_comment=''
+    local comment_slug=''
+    local out_file=''    
 
+    _show_new_files_help() {
+        cat <<'EOF'
+show_new_files - Find recently changed/created files on the system
+
+USAGE:
+    show_new_files [DURATION] [OPTIONS]
+
+ARGUMENTS:
+    DURATION            Time window to search (default: 60m)
+                        Format: NUMBER[s|m|h|d]
+                          s - seconds   (e.g.: 30s)
+                          m - minutes   (e.g.: 45m, or just 45)
+                          h - hours     (e.g.: 2h)
+                          d - days      (e.g.: 1d)
+                        No suffix = minutes. Examples: 30 == 30m, 2h == 120m
+
+OPTIONS:
+    Time Options:
+        --modify-time   Use file modification time (mtime) instead of
+                        change time (ctime, default)
+        --sort-time     Sort results by time (default: sort by name)
+
+    Search Scope:
+        --dir           Search current directory only (default: whole filesystem /)
+        --all           Include all directories: /proc /sys /dev /run
+                        /var/lib/docker .git (default: excluded)
+        --share         Include network shares: cifs, nfs, 9p mounts
+                        (default: excluded)
+        --exclude=PATHS Space-separated list of paths to exclude
+                        Example: --exclude="/var/cache /home/user"
+
+    Output / Log:
+        --no-create     Print to stdout only, do not save log file
+                        (default: save to /tmp/new_files/YYYY-MM-DD/)
+        --comment=TEXT  Attach a comment to this run:
+                          - Full text written as first line of log file
+                          - Truncated slug appended to log filename
+                        Example: --comment="after nginx install"
+
+    Other:
+        -h, --help      Show this help message
+
+OUTPUT FILE:
+    Saved to: /tmp/new_files/YYYY-MM-DD/changed_from_HHh-MMm-SSs_last_DURATION[_slug]
+    Directory permissions: 0777 (world-writable)
+    File permissions:      0444 (read-only)
+
+EXAMPLES:
+    # Files changed in last 30 minutes (whole system)
+    show_new_files 30
+
+    # Files changed in last hour, sort by time
+    show_new_files 60 --sort-time
+
+    # Search current dir only, no log file
+    show_new_files 10 --dir --no-create
+
+    # Include network shares, exclude /home
+    show_new_files 60 --share --exclude="/home"
+
+    # Label this run with a comment
+    show_new_files 30 --comment="before package update"
+
+    # Use modification time, include all dirs
+    show_new_files 120 --modify-time --all
+EOF
+    }
 
     if [ -n "$1" ]; then
-        if [[ "$1" =~ ^[0-9]+$ ]]; then
-            minits=${1}
+        if [[ "$1" =~ ^([0-9]+)([smhd]?)$ ]]; then
+            local num="${BASH_REMATCH[1]}"
+            local unit="${BASH_REMATCH[2]:-m}"
+            case "$unit" in
+                s) minits=$(awk "BEGIN{printf \"%.4f\", $num/60}") ;;
+                m) minits=$num ;;
+                h) minits=$(( num * 60 )) ;;
+                d) minits=$(( num * 1440 )) ;;
+            esac
+            duration_label="${num}${unit}"
         fi
     fi
 
@@ -562,6 +646,8 @@ function show_new_files() {
             --exclude=*) exclude="${1#*=}" ;;
             --share) no_shares=false ;;
             --all) include_all_dirs=true; no_shares=true ;;
+            --comment=*) add_comment="${1#*=}" ;;
+            -h|--help) _show_new_files_help; return ;;
             *)
                 #ignore
                 ;;
@@ -625,7 +711,15 @@ function show_new_files() {
     if $no_create; then
         command_output="cat"
     else
+        if [ -n "$add_comment" ]; then
+            comment_slug="_$(echo "$add_comment" \
+                |tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '_' \
+                |sed 's/^_//; s/_$//' | cut -c1-20)"
+        fi
+        out_file="changed_from_${TIME}_last_${duration_label}${comment_slug}"
+
         if [ ! -d ${out_path} ]; then mkdir -p ${out_path}; fi
+        find /tmp/new_files -type d -exec chmod 0777 {} +
         check_tee=$(type -P tee)
         if [[ $? == 0 ]];
             then new_cat='tee -a'
@@ -649,10 +743,10 @@ function show_new_files() {
           tail -n10
         )
 
-        echo "$(date +%F %H:%M:%S)" > ${out_path}/changed_from_${TIME}_last_${minits}_min
-        echo -e "args: ${all_cli_args} \n ${last_history} \n " >> ${out_path}/changed_from_${TIME}_last_${minits}_min
-        command_output="$new_cat ${out_path}/changed_from_${TIME}_last_${minits}_min"
-        echo_console="saved output in ${out_path}/changed_from_${TIME}_last_${minits}_min"
+        echo "$(date '+%F %H:%M:%S')${add_comment:+ ${add_comment}}" > ${out_path}/${out_file}
+        echo -e "args: ${all_cli_args} \n ${last_history} \n " >> ${out_path}/${out_file}
+        command_output="$new_cat ${out_path}/${out_file}"
+        echo_console="saved output in ${out_path}/${out_file}"        
     fi
 
     ${sudo_used} find ${search_path} -type d  \( ${start_exclude_path} ${exclude_def} \
@@ -678,6 +772,7 @@ function show_new_files() {
     }' \
     |sort ${sort_args} \
     |eval "$( echo ${command_output} )"
+    [ -n "$out_file" ] && [ -f "${out_path}/${out_file}" ] && chmod 0444 "${out_path}/${out_file}"
     echo -e "\n\033[0;32m ${echo_console} \033[0m"
 
 #| **Sort Key**      | **Description**                                                                     |
@@ -711,6 +806,73 @@ show_changed_files() {
     local out_path="/tmp/new_files/${DATE}"
     local echo_console=''
     local all_cli_args="$*"
+    local date_from=''
+    local date_to=''
+    local from_epoch=0
+    local to_epoch=0
+    local date_filter='cat'
+    local max_depth=''
+    local depth_arg=''
+    local help_text
+
+    help_text=$(cat <<'EOF'
+show_changed_files - Show recently changed files sorted by change time
+
+USAGE:
+    show_changed_files [PATH] [OPTIONS]
+
+ARGUMENTS:
+    PATH                Directory to search (default: current directory .)
+
+OPTIONS:
+    Output:
+        --head=N        Limit output to N results (default: 25)
+        --lenght=N      Alias for --head=N
+        --nocolumn      Disable column alignment (use tab instead)
+        --date-format=FMT  Date format for ls --time-style (default: long-iso)
+                           Examples: long-iso, full-iso, iso, +%F\ %T
+
+    Sorting:
+        --old           Show oldest files first (default: newest first)
+
+    Search Scope:
+        --level=N       Limit directory depth (find -maxdepth N)
+        --exclude=PATHS Space-separated list of paths to exclude
+
+    Date Filter:
+        --date-from=DATE  Show files changed on or after DATE
+                          Format: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS"
+                          Without --date-to: from DATE to now
+        --date-to=DATE    Show files changed on or before DATE
+                          Without --date-from: from beginning to DATE
+                          Both together: exact date range
+
+    Log:
+        --create        Save output to /tmp/new_files/YYYY-MM-DD/
+
+    Other:
+        -h, --help      Show this help message
+
+EXAMPLES:
+    # Recently changed files in current dir
+    show_changed_files
+
+    # Search /etc, show 50 results
+    show_changed_files /etc --head=50
+
+    # Files changed since March 1st
+    show_changed_files --date-from="2026-03-01"
+
+    # Files changed in a specific range
+    show_changed_files /var --date-from="2026-03-01" --date-to="2026-03-02 12:00"
+
+    # Only top-level files, oldest first
+    show_changed_files /etc --level=1 --old
+
+    # Search and save to log
+    show_changed_files /etc --create
+EOF
+)
 
     if [ -n "$1" ]; then
         if [[ "$1" != 'help' ]] \
@@ -735,6 +897,10 @@ show_changed_files() {
             --exclude=*) exclude="${1#*=}" ;;
             --old) old_sort=true ;;
             --create) create=true ;;
+            --date-from=*) date_from="${1#*=}" ;;
+            --date-to=*) date_to="${1#*=}" ;;
+            --level=*) max_depth="${1#*=}" ;;
+            -h|--help|help) echo "$help_text"; return ;;
             *)
                 #ignore
                 ;;
@@ -759,6 +925,22 @@ show_changed_files() {
         sort_date="eval sort -n"
     fi
 
+    if [ -n "$date_from" ]; then
+        from_epoch=$(date -d "$date_from" +%s 2>/dev/null) \
+            || { echo "show_changed_files: invalid --date-from: '$date_from'" >&2; return 1; }
+    fi
+    
+    if [ -n "$date_to" ]; then
+        to_epoch=$(date -d "$date_to" +%s 2>/dev/null) \
+            || { echo "show_changed_files: invalid --date-to: '$date_to'" >&2; return 1; }
+    fi
+
+    if [ "$from_epoch" -ne 0 ] || [ "$to_epoch" -ne 0 ]; then
+        date_filter="awk -v f=${from_epoch} -v t=${to_epoch} '(f==0||\$1>=f)&&(t==0||\$1<=t)'"
+    fi    
+
+    [ -n "$max_depth" ] && depth_arg="-maxdepth $max_depth"
+
     if $create; then
         if [ ! -d ${out_path} ]; then mkdir -p ${out_path}; fi
         check_tee=$(type -P tee)
@@ -773,9 +955,10 @@ show_changed_files() {
         command_output="cat"
     fi
 
-    ${sudo_used} find ${search_path} -type d  \( ${start_exclude_path} \
+    ${sudo_used} find ${search_path} ${depth_arg} -type d  \( ${start_exclude_path} \
                     ${exclude_paths} \) -prune \
                     -o -type f -exec stat -c '%Z %n' {} \; \
+    |eval "${date_filter}" \
     |${sort_date}  |head -n${row_lenght} |cut -d' ' -f2- \
     |${sudo_used} xargs -I{} ls -lhtc --time-style=${iso_format} -- {} \
     |${column} \
@@ -811,17 +994,304 @@ addBackup() {
                 else ${sudo_used} tar czfp ${backup_path}_${num}.tar.gz ${backup_path}
             fi
         else
-            check_previous="$(2>/dev/null ls -a ${backup_path}* |egrep '\.bak[0-9]*' 2> /dev/null)"
+            check_previous="$(2>/dev/null ls -a ${backup_path}* |egrep '\.bak[0-9]+\.bak' 2> /dev/null)"
             if [ -n "$check_previous" ]; then
                 check_num=$(echo "$check_previous" |wc -l)
             fi
             num=$(expr $check_num + 1)
-            ${sudo_used} cp -a ${backup_path} ${backup_path}.bak${num}
-            ${sudo_used} chmod 0444 ${backup_path}.bak${num}
+            ${sudo_used} cp -a ${backup_path} ${backup_path}.bak${num}.bak
+
+            if echo "$check_type" | grep -qi 'text\|script'; then
+                local ext="${1##*.}"
+                local comment_prefix='#'
+                local comment_suffix=''
+
+                case "${ext,,}" in
+                    js|ts|java|c|cpp|cc|h|hpp|go|rs|swift|kt|cs|php)
+                        comment_prefix='//' ;;
+                    html|htm|xml|svg|xhtml)
+                        comment_prefix='<!--'; comment_suffix=' -->' ;;
+                    css|scss|less)
+                        comment_prefix='/*'; comment_suffix=' */' ;;
+                    sql|lua)
+                        comment_prefix='--' ;;
+                    tex|sty|cls)
+                        comment_prefix='%' ;;
+                esac
+
+                local date_str="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+                local comment_line="${comment_prefix} Backup created: ${date_str}${comment_suffix}"
+                local tmpfile="$(mktemp)"
+                { echo "${comment_line}"; ${sudo_used} cat "${backup_path}.bak${num}.bak"; } > "${tmpfile}"
+                ${sudo_used} mv "${tmpfile}" "${backup_path}.bak${num}.bak"
+            fi
+
+            ${sudo_used} chmod 0444 ${backup_path}.bak${num}.bak
             if [ -n "$check_exist_chattr" ]; then
-                ${sudo_used} chattr +A ${backup_path}.bak${num}
+                ${sudo_used} chattr +A ${backup_path}.bak${num}.bak
             fi
     fi
+}
+
+addVers() {
+# save versioned copy of file to /tmp/versions/<cur_path>/<file>_versN
+    if [ -z "$1" ]; then
+        echo "Error: file not specified" >&2
+        echo "Usage: addVers <file>" >&2
+        return 1
+    fi
+
+    local filepath
+    if [[ "$1" = /* ]]; then
+        filepath="$1"
+    else
+        filepath="${PWD}/${1}"
+    fi
+
+    if [ ! -f "$filepath" ]; then
+        echo "Error: file '$1' does not exist" >&2
+        return 1
+    fi
+
+    local filename="$(basename "$filepath")"
+    local dirpath="$(dirname "$filepath")"
+    local vers_dir="/tmp/versions${dirpath}"
+    local check_num=0
+    local num=1
+
+    mkdir -p "$vers_dir"
+    local check_previous
+    check_previous="$(ls "${vers_dir}/${filename}_vers"[0-9]* 2>/dev/null)"
+    if [ -n "$check_previous" ]; then
+        check_num=$(echo "$check_previous" | wc -l)
+        num=$(expr $check_num + 1)
+    fi
+
+    local vers_path="${vers_dir}/${filename}_vers${num}"
+    cp -a "$filepath" "$vers_path"
+    echo "Saved: ${vers_path}"
+}
+
+addGit() {
+# create local git repository and track files
+# Usage: addGit [--path <path>] [--repo <name>] [--comment <msg>] [--branch <name>] [--diff] [files...]
+# --path required only on first init; repo auto-detected from file paths on subsequent calls
+    local path=""
+    local repo=""
+    local comment=""
+    local branch="master"
+    local do_diff=false
+    local files=()
+    local sudo_used=''
+    local help_text
+
+    help_text=$(cat <<'EOF'
+USAGE:
+    addGit [--path <path>] [--repo <name>] [--comment <msg>] [--branch <name>] [--diff] [files...]
+
+ARGUMENTS:
+    files...   Files to track (relative to --path or absolute)
+
+OPTIONS:
+    --path     Root path to track (required for first init only)
+    --repo     Repository name (default: basename of --path)
+    --comment  Commit message (default: current date)
+    --branch   Branch name (default: master)
+    --diff     Show diff vs tracked file only (no copy/commit)
+
+On existing repos --path and --repo are optional:
+repo is auto-detected by matching file paths against README.md records.
+Repository location: ~/DOWNLOAD/local_GIT/<repo_name>
+EOF
+)
+
+    if [[ $EUID -ne 0 ]]; then
+        if sudo -v 2>/dev/null; then sudo_used='sudo'; fi
+    fi
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --path=*)    path="${1#*=}" ;;
+            --path)      path="$2"; shift ;;
+            --repo=*)    repo="${1#*=}" ;;
+            --repo)      repo="$2"; shift ;;
+            --comment=*) comment="${1#*=}" ;;
+            --comment)   comment="$2"; shift ;;
+            --branch=*)  branch="${1#*=}" ;;
+            --branch)    branch="$2"; shift ;;
+            --diff)      do_diff=true ;;
+            -h|--help)   echo "$help_text"; return ;;
+            --*) echo "Error: unknown option '$1'" >&2; return 1 ;;
+            *)   files+=("$1") ;;
+        esac
+        shift
+    done
+
+    [ -n "$path" ] && path="${path%/}"
+    [ -z "$comment" ] && comment="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    local git_home
+    if [ -n "$SUDO_USER" ]; then
+        git_home="/home/${SUDO_USER}"
+    else
+        git_home="/home/${USER}"
+    fi
+    local local_GIT_dir="${git_home}/DOWNLOAD/local_GIT"
+
+    # --- Resolve repo + path ---
+
+    # --path given, --repo not → repo = basename(path)
+    [ -z "$repo" ] && [ -n "$path" ] && repo="$(basename "$path")"
+
+    # --repo given, --path not → read path from existing repo's README.md
+    if [ -n "$repo" ] && [ -z "$path" ] && [ -f "${local_GIT_dir}/${repo}/README.md" ]; then
+        path="$(head -1 "${local_GIT_dir}/${repo}/README.md")"
+        path="${path%/}"
+    fi
+
+    # neither given → auto-detect repo by matching first file's abs path against all README.md
+    if [ -z "$repo" ] && [ -z "$path" ]; then
+        if [ ${#files[@]} -eq 0 ]; then
+            echo "Error: specify --path to create a repo, or provide files for auto-detection" >&2
+            echo "Run: addGit --help" >&2
+            return 1
+        fi
+        local _probe="${files[0]}"
+        [[ "$_probe" != /* ]] && _probe="${PWD}/${_probe}"
+        if [ -d "$local_GIT_dir" ]; then
+            local _readme _cand
+            for _readme in "${local_GIT_dir}"/*/README.md; do
+                [ -f "$_readme" ] || continue
+                _cand="$(head -1 "$_readme")"
+                _cand="${_cand%/}"
+                if [[ "$_probe" == "${_cand}/"* ]] || [[ "$_probe" == "$_cand" ]]; then
+                    repo="$(basename "$(dirname "$_readme")")"
+                    path="$_cand"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$repo" ]; then
+            echo "Error: no repository found for '${files[0]}'" >&2
+            echo "Use --path <root> to create a new repository" >&2
+            return 1
+        fi
+        echo "Auto-detected: repo='${repo}'  path='${path}'"
+    fi
+
+    local git_dir="${local_GIT_dir}/${repo}"
+
+    # --repo given but repo doesn't exist and no --path → can't init
+    if [ -z "$path" ]; then
+        echo "Error: repository '${repo}' not found — use --path for initial setup" >&2
+        return 1
+    fi
+
+    # resolve absolute path from file argument
+    _ag_abspath() {
+        if [[ "$1" = /* ]]; then echo "$1"
+        else echo "${path}/${1}"; fi
+    }
+
+    # resolve relative path inside git repo
+    _ag_relpath() {
+        if [[ "$1" == "${path}/"* ]]; then echo "${1#${path}/}"
+        else echo "${1#/}"; fi
+    }
+    # --- --diff mode: show diff only, no copy/commit ---
+    if $do_diff; then
+        if [ ! -d "${git_dir}/.git" ]; then
+            echo "Error: repository '${repo}' not found at ${git_dir}" >&2
+            unset -f _ag_abspath _ag_relpath
+            return 1
+        fi
+
+        if [ ${#files[@]} -eq 0 ]; then
+            echo "Error: specify at least one file for --diff" >&2
+            unset -f _ag_abspath _ag_relpath
+            return 1
+        fi
+
+        local abs_file rel_path tracked
+        for f in "${files[@]}"; do
+            abs_file="$(_ag_abspath "$f")"
+            rel_path="$(_ag_relpath "$abs_file")"
+            tracked="${git_dir}/${rel_path}"
+
+            if [ "$(basename "$abs_file")" != "$(basename "$tracked")" ]; then
+                echo "Error: filename mismatch — '$(basename "$abs_file")' vs '$(basename "$tracked")'" >&2
+                continue
+            fi
+            if [ ! -f "$abs_file" ]; then
+                echo "Error: file not found: $abs_file" >&2; continue
+            fi
+            if [ ! -f "$tracked" ]; then
+                echo "Error: not tracked in repo: $tracked" >&2; continue
+            fi
+            echo -e "\033[0;36m${abs_file}  ${tracked}\033[0m"
+            echo -e "\033[0;33m--- ${abs_file}\033[0m"
+            echo -e "\033[0;33m+++ ${tracked}\033[0m"
+            diff -Zbw "$abs_file" "$tracked"
+        done
+        unset -f _ag_abspath _ag_relpath
+        return 0
+    fi
+
+    # --- Create or reuse repo ---
+    local prev_dir="$PWD"
+    local repo_new=false
+
+    if [ ! -d "${git_dir}/.git" ]; then
+        repo_new=true
+        mkdir -p "$git_dir" || { echo "Error: cannot create $git_dir" >&2; unset -f _ag_abspath _ag_relpath; return 1; }
+        cd "$git_dir" || { unset -f _ag_abspath _ag_relpath; return 1; }
+        git init
+        git symbolic-ref HEAD "refs/heads/${branch}"
+        echo "$path" > README.md
+        git add README.md
+        echo "Created repository: ${git_dir}  [branch: ${branch}]"
+    else
+        cd "$git_dir" || { unset -f _ag_abspath _ag_relpath; return 1; }
+        local cur_branch
+        cur_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+        if [ "$cur_branch" != "$branch" ]; then
+            git checkout "$branch" 2>/dev/null || git checkout -b "$branch" 2>/dev/null
+        fi
+        echo "Using existing repository: ${git_dir}  [branch: ${branch}]"
+    fi
+
+    # --- Copy and stage files ---
+    local abs_file rel_path dest dest_dir
+    for f in "${files[@]}"; do
+        abs_file="$(_ag_abspath "$f")"
+
+        if [ ! -f "$abs_file" ]; then
+            echo "Warning: '$abs_file' is not a file or does not exist, skipping" >&2; continue
+        fi
+        if [ ! -s "$abs_file" ]; then
+            echo "Warning: '$abs_file' is empty, skipping" >&2; continue
+        fi
+
+        rel_path="$(_ag_relpath "$abs_file")"
+        dest="${git_dir}/${rel_path}"
+        dest_dir="$(dirname "$dest")"
+
+        mkdir -p "$dest_dir" || { echo "Error: cannot create $dest_dir" >&2; continue; }
+        ${sudo_used} cp -a "$abs_file" "$dest" || { echo "Error: cannot copy $abs_file" >&2; continue; }
+        git add "$dest"
+        echo "Tracked: $dest"
+    done
+
+    # --- Commit ---
+    if git diff --cached --quiet 2>/dev/null; then
+        echo "Nothing new to commit"
+    else
+        ${repo_new} && git commit -m "init repo" || git commit -m "$comment"
+        echo -e "\033[0;32mDone: ${git_dir}  [branch: ${branch}]\033[0m"
+    fi
+
+    cd "$prev_dir" 2>/dev/null || true
+    unset -f _ag_abspath _ag_relpath
 }
 
 
@@ -1072,9 +1542,9 @@ function docker_log() {
             echo -e "==================== LOGS for ${1} =====================: \n\n"
             while true; do
                 part_line="$(
-                    printf '\n'; printf '%.0s-' {1..50}; \
+                    printf '\n'; printf '%.0s-' {1..30}; \
                     printf '  %s  ' "$(date '+%A %B %d   %H:%M:%S %Y %Z')"; \
-                    printf '%.0s-' {1..50}; printf '\n'
+                    printf '%.0s-' {1..30}; printf '\n'
                 )"
 
                 if [[ "$output_format" =~ ^json ]] && command -v jq &>/dev/null
@@ -1195,9 +1665,9 @@ journal_log () {
     echo -e "==================== LOGS for ${unit} =====================\n"
     while true; do
         part_line="$(
-            printf '\n'; printf '%.0s-' {1..50}; \
+            printf '\n'; printf '%.0s-' {1..30}; \
             printf '  %s  ' "$(date '+%A %B %d   %H:%M:%S %Y %Z')"; \
-            printf '%.0s-' {1..50}; printf '\n'
+            printf '%.0s-' {1..30}; printf '\n'
         )"
 
         if [[ "$output_format" =~ ^json ]] && command -v jq &>/dev/null
@@ -1294,6 +1764,88 @@ renull() {
     echo "File '$1' successfully clean"
 }
 
+pbcopy() {
+# copy to clipboard buffer    
+    local xsel_exist=false
+    local xclip_exist=false
+
+    local path_xsel=$(type -P xsel)
+    if [[ $? == 0 ]]; then
+        xsel_exist=true
+    fi
+
+    local path_xclip=$(type -P xclip)
+    if [[ $? == 0 ]]; then
+        xclip_exist=true
+    fi
+    
+    if $check_xsel; then
+        cat "$1" |$path_xsel --clipboard --input
+    elif $check_xclip; then
+        cat "$1" |$path_xclip -selection clipboard
+    else
+        echo -e "xsel or xclip not found, please install this before use it \n"
+    fi            
+}
+
+pbpaste() {
+# paste from clipboard buffer    
+    local xsel_exist=false
+    local xclip_exist=false
+    local output_path="$1"
+
+    local path_xsel=$(type -P xsel)
+    if [[ $? == 0 ]]; then
+        xsel_exist=true
+    fi
+
+    local path_xclip=$(type -P xclip)
+    if [[ $? == 0 ]]; then
+        xclip_exist=true
+    fi
+    
+    if $check_xsel; then
+        if [ -n "$output_path" ]
+            then $path_xsel --clipboard --output >> $output_path
+            else $path_xsel --clipboard --output
+        fi
+    elif $check_xclip; then
+        if [ -n "$output_path" ]
+            then $path_xclip -selection clipboard -o >> $output_path
+            else $path_xclip -selection clipboard -o
+        fi
+    else
+        echo -e "xsel or xclip not found, please install this before use it \n"
+    fi            
+}
+
+lla_z() {
+# show list files without archive versions    
+    echo -e "this dir - $PWD \n"
+    ls -lat "$PWD" |egrep -v '*.gz|*.bz|*.tar|*zip|*.rar| .$| ..$'
+}
+
+#source $HOME/.shell_source/ext_functions/catuniq
+if [ -d "$HOME/.shell_source/ext_functions" ]; then
+    for file in "$HOME/.shell_source/ext_functions"/*; do
+        [ -f "$file" ] && . "$file"
+    done
+fi
+
+seb() {
+    local sudo_used=''
+    local cmd="${*//\"/\\\"}"
+    if $(sudo -v); then sudo_used='sudo'; fi
+    ${sudo_used} sudo bash -c "$cmd"
+}
+
+ses() {
+    local sudo_used=''
+    local cmd="${*//\"/\\\"}"
+    if $(sudo -v); then sudo_used='sudo'; fi
+    ${sudo_used} sudo sh -c "$cmd"
+}
+
 myfunctions_aliases () {
     echo -e '
 HIGHLIGHTS HISTORY SEARCH:
@@ -1337,7 +1889,7 @@ DISK SIZE CHECK:
 NET CHECK:
         ports                       - show all ports listening
         ports4, ports6
-        cmyip, ip_a
+        cmyip, ip_a, ip_r
 
 SEARCH:
         removeComments      - cat and remove comments
@@ -1347,6 +1899,7 @@ SEARCH:
         dirtree, stripcomments
         show_new_files
         show_changed_files
+        catuniq
 
 DOCKER:
         docker_all
@@ -1360,7 +1913,13 @@ DOCKER:
         docker_inspect
 
 SYNC:
-       scpresume
+        scpresume
+
+BACKUP/COPY:
+        addBackupa          - backup file/dir (.bak<N>.bak or .tar.gz)
+        addVers             - version file to /tmp/versions/<path>/<file>_vers<N>
+        addGit              - track file/s in local git repo ~/DOWNLOAD/local_GIT/<repo>
+        pbcopy, pbpaste     - copy / paste for / from clipboard
 
 HIGHLIGHTS:
         gulimit             - highlight ulimit
@@ -1384,7 +1943,7 @@ OTHER:
         extract cat_z
         defcat              - /usr/bin/cat
         scriptformat        - remove ansci unprintable cahracters
-        se                  - short sudo
+        se, ses, seb        - short sudo
         sq, plz, sr, l1
         maketar
         makezip
@@ -1392,11 +1951,11 @@ OTHER:
         vime, svi
         wdownload, lnn
         xsc, lnn
-        lla, lss
+        lla, lss, lla_z
         scrd, mounts, supdate
         sprunge, phpinfo_e
         speedt, speedt1, speeddown
-        locru, locen, lessr. jobs
+        locru, locen, lessr, jobs, renull
 
     '
 }

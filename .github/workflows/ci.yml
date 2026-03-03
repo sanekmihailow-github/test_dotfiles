@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+
+  # ── 1. Syntax check (статика, достаточно одной платформы) ───────────────────
+  syntax:
+    name: Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n on shell source files
+        run: |
+          echo "Checking .shell_source/ files..."
+          for f in .shell_source/functions .shell_source/alias .shell_source/defaults \
+                   .shell_source/exports .shell_source/git \
+                   .shell_source/prompt .shell_source/prompt_root; do
+            echo -n "  $f ... "
+            bash -n "$f" && echo "OK" || { echo "FAIL"; exit 1; }
+          done
+
+      - name: bash -n on install/helper scripts
+        run: |
+          echo "Checking .sh scripts..."
+          for f in dot_install.sh dot_uninstall.sh functions.sh scripts/*.sh \
+                   .local/bin/tmux-sessions; do
+            [ -f "$f" ] || continue
+            echo -n "  $f ... "
+            bash -n "$f" && echo "OK" || { echo "FAIL"; exit 1; }
+          done
+
+      - name: Python syntax check
+        run: |
+          echo "Checking Python scripts..."
+          for f in .local/bin/colorex .local/bin/grc .local/bin/grcat; do
+            [ -f "$f" ] || continue
+            echo -n "  $f ... "
+            python3 -m py_compile "$f" && echo "OK" || { echo "FAIL"; exit 1; }
+          done
+
+  # ── 2. Shellcheck (статика, достаточно одной платформы) ─────────────────────
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck (severity=error — only real bugs)
+        run: |
+          echo "Shellcheck on install scripts..."
+          shellcheck --severity=error \
+            dot_install.sh dot_uninstall.sh functions.sh
+
+          echo "Shellcheck on utility scripts..."
+          for f in scripts/*.sh .local/bin/tmux-sessions; do
+            [ -f "$f" ] || continue
+            echo -n "  $f ... "
+            shellcheck --severity=error "$f" && echo "OK"
+          done
+
+          echo "Shellcheck on shell_source (severity=error)..."
+          for f in .shell_source/functions .shell_source/alias \
+                   .shell_source/defaults .shell_source/exports \
+                   .shell_source/git; do
+            echo -n "  $f ... "
+            shellcheck --severity=error --shell=bash "$f" && echo "OK"
+          done
+
+  # ── 3. Unit tests — matrix по платформам ────────────────────────────────────
+  unit-tests:
+    name: Unit Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false   # все платформы доходят до конца даже если одна упала
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            image: ubuntu:22.04
+            pkg_mgr: apt
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+            pkg_mgr: apt
+          - name: Debian 12
+            image: debian:12
+            pkg_mgr: apt
+          - name: Rocky Linux 9
+            image: rockylinux:9
+            pkg_mgr: dnf
+          - name: Arch Linux
+            image: archlinux:latest
+            pkg_mgr: pacman
+          - name: Alpine 3.19
+            image: alpine:3.19
+            pkg_mgr: apk
+
+    steps:
+      - name: Install git + dependencies (apt)
+        if: matrix.pkg_mgr == 'apt'
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git zip bzip2 zstd ca-certificates
+
+      - name: Install git + dependencies (dnf)
+        if: matrix.pkg_mgr == 'dnf'
+        run: |
+          dnf install -y git zip bzip2 zstd
+
+      - name: Install git + dependencies (pacman)
+        if: matrix.pkg_mgr == 'pacman'
+        run: |
+          pacman -Sy --noconfirm git zip bzip2 zstd
+
+      - name: Install git + dependencies (apk)
+        if: matrix.pkg_mgr == 'apk'
+        run: |
+          apk add --no-cache git zip bzip2 zstd bash
+
+      - uses: actions/checkout@v4
+
+      - name: Configure git (required for addGit commits)
+        run: |
+          git config --global user.email "ci@test.local"
+          git config --global user.name "CI Test"
+          git config --global init.defaultBranch master
+
+      - name: Run all tests
+        run: |
+          chmod +x tests/run_all.sh tests/test_*.sh
+          bash tests/run_all.sh
